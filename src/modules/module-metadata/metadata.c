@@ -22,13 +22,13 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include <pipewire/pipewire.h>
-#include "pipewire/private.h"
+#include <pipewire/impl.h>
 
 #include <extensions/metadata.h>
 
 struct impl {
 	struct pw_global *global;
+	struct spa_hook global_listener;
 
 	struct pw_metadata *metadata;
 	struct pw_resource *resource;
@@ -109,7 +109,7 @@ static const struct pw_resource_events resource_events = {
 };
 
 static int
-global_bind(void *_data, struct pw_client *client, uint32_t permissions,
+global_bind(void *_data, struct pw_impl_client *client, uint32_t permissions,
             uint32_t version, uint32_t id)
 {
 	struct impl *impl = _data;
@@ -124,8 +124,7 @@ global_bind(void *_data, struct pw_client *client, uint32_t permissions,
         data->impl = impl;
         data->resource = resource;
 
-	pw_log_debug(".");
-//	pw_resource_install_marshal(resource, true);
+	pw_global_add_resource(impl->global, resource);
 
 	/* listen for when the resource goes away */
         pw_resource_add_listener(resource,
@@ -133,22 +132,48 @@ global_bind(void *_data, struct pw_client *client, uint32_t permissions,
                         &resource_events, data);
 
 	/* resource methods -> implemention */
-	pw_log_debug(".");
 	pw_resource_add_object_listener(resource,
 			&data->object_listener,
                         &metadata_methods, data);
 	/* implementation events -> resource */
-	pw_log_debug(". %p", impl->metadata);
 	pw_metadata_add_listener(impl->metadata,
 			&data->metadata_listener,
 			&metadata_events, data);
-	pw_log_debug(".");
 
 	return 0;
 }
 
+static void global_destroy(void *data)
+{
+	struct impl *impl = data;
+	spa_hook_remove(&impl->global_listener);
+	impl->global = NULL;
+	if (impl->resource)
+		pw_resource_destroy(impl->resource);
+}
+
+static const struct pw_global_events global_events = {
+	PW_VERSION_GLOBAL_EVENTS,
+	.destroy = global_destroy,
+};
+
+static void global_resource_destroy(void *data)
+{
+	struct impl *impl = data;
+	spa_hook_remove(&impl->resource_listener);
+	impl->resource = NULL;
+	impl->metadata = NULL;
+	if (impl->global)
+		pw_global_destroy(impl->global);
+}
+
+static const struct pw_resource_events global_resource_events = {
+	PW_VERSION_RESOURCE_EVENTS,
+	.destroy = global_resource_destroy,
+};
+
 void *
-pw_metadata_new(struct pw_core *core, struct pw_resource *resource,
+pw_metadata_new(struct pw_context *context, struct pw_resource *resource,
 		   struct pw_properties *properties)
 {
 	struct impl *impl;
@@ -168,7 +193,7 @@ pw_metadata_new(struct pw_core *core, struct pw_resource *resource,
 
 	pw_resource_install_marshal(resource, true);
 
-	impl->global = pw_global_new(core,
+	impl->global = pw_global_new(context,
 			PW_TYPE_INTERFACE_Metadata,
 			PW_VERSION_METADATA,
 			properties,
@@ -180,7 +205,15 @@ pw_metadata_new(struct pw_core *core, struct pw_resource *resource,
 	impl->resource = resource;
 	impl->metadata = (struct pw_metadata*)resource;
 
+	pw_global_add_listener(impl->global,
+			&impl->global_listener,
+			&global_events, impl);
+
 	pw_global_register(impl->global);
+
+	pw_resource_add_listener(resource,
+			&impl->resource_listener,
+			&global_resource_events, impl);
 
 	return impl;
 }

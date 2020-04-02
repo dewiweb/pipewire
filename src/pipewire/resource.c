@@ -24,7 +24,6 @@
 
 #include <string.h>
 
-#include "pipewire/interfaces.h"
 #include "pipewire/private.h"
 #include "pipewire/protocol.h"
 #include "pipewire/resource.h"
@@ -41,10 +40,10 @@ struct impl {
 /** \endcond */
 
 SPA_EXPORT
-struct pw_resource *pw_resource_new(struct pw_client *client,
+struct pw_resource *pw_resource_new(struct pw_impl_client *client,
 				    uint32_t id,
 				    uint32_t permissions,
-				    uint32_t type,
+				    const char *type,
 				    uint32_t version,
 				    size_t user_data_size)
 {
@@ -57,11 +56,12 @@ struct pw_resource *pw_resource_new(struct pw_client *client,
 		return NULL;
 
 	this = &impl->this;
-	this->core = client->core;
+	this->context = client->context;
 	this->client = client;
 	this->permissions = permissions;
 	this->type = type;
 	this->version = version;
+	this->bound_id = SPA_ID_INVALID;
 
 	spa_hook_list_init(&this->listener_list);
 	spa_hook_list_init(&this->object_listener_list);
@@ -81,8 +81,7 @@ struct pw_resource *pw_resource_new(struct pw_client *client,
 
 	if ((res = pw_resource_install_marshal(this, false)) < 0) {
 		pw_log_error(NAME" %p: no marshal for type %s/%d", this,
-				spa_debug_type_find_name(pw_type_info(), type),
-				version);
+				type, version);
 		goto error_clean;
 	}
 
@@ -91,11 +90,9 @@ struct pw_resource *pw_resource_new(struct pw_client *client,
 		this->user_data = SPA_MEMBER(impl, sizeof(struct impl), void);
 
 	pw_log_debug(NAME" %p: new %u type %s/%d client:%p marshal:%p",
-			this, id,
-			spa_debug_type_find_name(pw_type_info(), type), version,
-			client, this->marshal);
+			this, id, type, version, client, this->marshal);
 
-	pw_client_emit_resource_added(client, this);
+	pw_impl_client_emit_resource_added(client, this);
 
 	return this;
 
@@ -108,7 +105,7 @@ error_clean:
 SPA_EXPORT
 int pw_resource_install_marshal(struct pw_resource *this, bool implementor)
 {
-	struct pw_client *client = this->client;
+	struct pw_impl_client *client = this->client;
 	const struct pw_protocol_marshal *marshal;
 
 	marshal = pw_protocol_get_marshal(client->protocol,
@@ -118,6 +115,8 @@ int pw_resource_install_marshal(struct pw_resource *this, bool implementor)
 		return -EPROTO;
 
 	this->marshal = marshal;
+	this->type = marshal->type;
+
 	this->impl = SPA_INTERFACE_INIT(
 			this->type,
 			this->marshal->version,
@@ -126,7 +125,7 @@ int pw_resource_install_marshal(struct pw_resource *this, bool implementor)
 }
 
 SPA_EXPORT
-struct pw_client *pw_resource_get_client(struct pw_resource *resource)
+struct pw_impl_client *pw_resource_get_client(struct pw_resource *resource)
 {
 	return resource->client;
 }
@@ -144,8 +143,10 @@ uint32_t pw_resource_get_permissions(struct pw_resource *resource)
 }
 
 SPA_EXPORT
-uint32_t pw_resource_get_type(struct pw_resource *resource)
+const char *pw_resource_get_type(struct pw_resource *resource, uint32_t *version)
 {
+	if (version)
+		*version = resource->version;
 	return resource->type;
 }
 
@@ -195,7 +196,7 @@ SPA_EXPORT
 int pw_resource_ping(struct pw_resource *resource, int seq)
 {
 	int res = -EIO;
-	struct pw_client *client = resource->client;
+	struct pw_impl_client *client = resource->client;
 
 	if (client->core_resource != NULL) {
 		pw_core_resource_ping(client->core_resource, resource->id, seq);
@@ -206,28 +207,75 @@ int pw_resource_ping(struct pw_resource *resource, int seq)
 }
 
 SPA_EXPORT
-void pw_resource_error(struct pw_resource *resource, int res, const char *error, ...)
+int pw_resource_set_bound_id(struct pw_resource *resource, uint32_t global_id)
 {
-	va_list ap;
-	struct pw_client *client = resource->client;
+	struct pw_impl_client *client = resource->client;
 
-	va_start(ap, error);
+	resource->bound_id = global_id;
+	if (client->core_resource != NULL) {
+		pw_log_debug(NAME" %p: %u global_id:%u", resource, resource->id, global_id);
+		pw_core_resource_bound_id(client->core_resource, resource->id, global_id);
+	}
+	return 0;
+}
+
+SPA_EXPORT
+uint32_t pw_resource_get_bound_id(struct pw_resource *resource)
+{
+	return resource->bound_id;
+}
+
+static void SPA_PRINTF_FUNC(4, 0)
+pw_resource_errorv_id(struct pw_resource *resource, uint32_t id, int res, const char *error, va_list ap)
+{
+	struct pw_impl_client *client = resource->client;
 	if (client->core_resource != NULL)
 		pw_core_resource_errorv(client->core_resource,
-				resource->id, client->recv_seq, res, error, ap);
+				id, client->recv_seq, res, error, ap);
+}
+
+SPA_EXPORT
+void pw_resource_errorf(struct pw_resource *resource, int res, const char *error, ...)
+{
+	va_list ap;
+	va_start(ap, error);
+	pw_resource_errorv_id(resource, resource->id, res, error, ap);
 	va_end(ap);
+}
+
+SPA_EXPORT
+void pw_resource_errorf_id(struct pw_resource *resource, uint32_t id, int res, const char *error, ...)
+{
+	va_list ap;
+	va_start(ap, error);
+	pw_resource_errorv_id(resource, id, res, error, ap);
+	va_end(ap);
+}
+
+SPA_EXPORT
+void pw_resource_error(struct pw_resource *resource, int res, const char *error)
+{
+	struct pw_impl_client *client = resource->client;
+	if (client->core_resource != NULL)
+		pw_core_resource_error(client->core_resource,
+				resource->id, client->recv_seq, res, error);
 }
 
 SPA_EXPORT
 void pw_resource_destroy(struct pw_resource *resource)
 {
-	struct pw_client *client = resource->client;
+	struct pw_impl_client *client = resource->client;
+
+	if (resource->global) {
+		spa_list_remove(&resource->link);
+		resource->global = NULL;
+	}
 
 	pw_log_debug(NAME" %p: destroy %u", resource, resource->id);
 	pw_resource_emit_destroy(resource);
 
 	pw_map_insert_at(&client->objects, resource->id, NULL);
-	pw_client_emit_resource_removed(client, resource);
+	pw_impl_client_emit_resource_removed(client, resource);
 
 	if (client->core_resource && !resource->removed)
 		pw_core_resource_remove_id(client->core_resource, resource->id);
@@ -235,4 +283,11 @@ void pw_resource_destroy(struct pw_resource *resource)
 	pw_log_debug(NAME" %p: free %u", resource, resource->id);
 
 	free(resource);
+}
+
+SPA_EXPORT
+void pw_resource_remove(struct pw_resource *resource)
+{
+	resource->removed = true;
+	pw_resource_destroy(resource);
 }

@@ -1,10 +1,11 @@
 test_apps = [
 	'test-array',
 	'test-client',
-	'test-core',
+	'test-context',
+	'test-endpoint',
 	'test-interfaces',
 	'test-properties',
-	'test-remote',
+	#	'test-remote',
 	'test-stream',
 	'test-utils'
 ]

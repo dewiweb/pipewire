@@ -29,20 +29,22 @@ struct quality {
 	double cutoff;
 };
 
-#define DEFAULT_QUALITY	4
-
 static const struct quality blackman_qualities[] = {
 	{ 8, 0.5, },
-	{ 16, 0.6, },
-	{ 24, 0.72, },
+	{ 16, 0.70, },
+	{ 24, 0.76, },
 	{ 32, 0.8, },
-	{ 48, 0.85, },                  /* default */
+	{ 48, 0.865, },                  /* default */
 	{ 64, 0.90, },
 	{ 80, 0.92, },
 	{ 96, 0.933, },
 	{ 128, 0.950, },
 	{ 144, 0.955, },
-	{ 160, 0.960, }
+	{ 160, 0.960, },
+	{ 192, 0.965, },
+	{ 256, 0.975, },
+	{ 896, 0.997, },
+	{ 1024, 0.998, },
 };
 
 static inline double sinc(double x)
@@ -96,6 +98,9 @@ static void impl_native_update_rate(struct resample *r, double rate)
 	struct native_data *data = r->data;
 	uint32_t in_rate, out_rate, phase, gcd, old_out_rate;
 
+	if (SPA_LIKELY(data->rate == rate))
+		return;
+
 	old_out_rate = data->out_rate;
 	in_rate = r->i_rate / rate;
 	out_rate = r->o_rate;
@@ -122,6 +127,10 @@ static void impl_native_update_rate(struct resample *r, double rate)
 		bool is_full = rate == 1.0;
 
 		data->func = is_full ? do_resample_full_c : do_resample_inter_c;
+#if defined (HAVE_NEON)
+		if (SPA_FLAG_IS_SET(r->cpu_flags, SPA_CPU_FLAG_NEON))
+			data->func = is_full ? do_resample_full_neon : do_resample_inter_neon;
+#endif
 #if defined (HAVE_SSE)
 		if (SPA_FLAG_IS_SET(r->cpu_flags, SPA_CPU_FLAG_SSE))
 			data->func = is_full ? do_resample_full_sse : do_resample_inter_sse;
@@ -163,9 +172,9 @@ static void impl_native_process(struct resample *r,
 	hist = data->hist;
 	refill = 0;
 
-	if (hist) {
+	if (SPA_LIKELY(hist)) {
 		/* first work on the history if any. */
-		if (hist < n_taps) {
+		if (SPA_UNLIKELY(hist < n_taps)) {
 			/* we need at least n_taps to completely process the
 			 * history before we can work on the new input. When
 			 * we have less, refill the history. */
@@ -173,7 +182,7 @@ static void impl_native_process(struct resample *r,
 			for (c = 0; c < r->channels; c++)
 				spa_memcpy(&history[c][hist], s[c], refill * sizeof(float));
 
-			if (hist + refill < n_taps) {
+			if (SPA_UNLIKELY(hist + refill < n_taps)) {
 				/* not enough in the history, keep the input in
 				 * the history and produce no output */
 				data->hist = hist + refill;
@@ -186,18 +195,20 @@ static void impl_native_process(struct resample *r,
 		 * and we try to process it */
 		in = hist + refill;
 		out = *out_len;
-		data->func(r, (const void**)history, &in, dst, 0, &out);
+		data->func(r, (const void**)history, 0, &in, dst, 0, &out);
 		spa_log_trace_fp(r->log, "native %p: in:%d/%d out %d/%d hist:%d",
 				r, hist + refill, in, *out_len, out, hist);
 	} else {
 		out = in = 0;
 	}
 
-	if (in >= hist) {
+	if (SPA_LIKELY(in >= hist)) {
+		int skip = in - hist;
 		/* we are past the history and can now work on the new
 		 * input data */
-		in = *in_len;
-		data->func(r, src, &in, dst, out, out_len);
+		in = *in_len - skip;
+		data->func(r, src, skip, &in, dst, out, out_len);
+
 		spa_log_trace_fp(r->log, "native %p: in:%d/%d out %d/%d",
 				r, *in_len, in, *out_len, out);
 
@@ -243,30 +254,33 @@ static void impl_native_reset (struct resample *r)
 {
 	struct native_data *d = r->data;
 	memset(d->hist_mem, 0, r->channels * sizeof(float) * d->n_taps * 2);
-	d->hist = d->n_taps - 1;
+	d->hist = (d->n_taps / 2) - 1;
 	d->phase = 0;
 }
 
 static uint32_t impl_native_delay (struct resample *r)
 {
 	struct native_data *d = r->data;
-	return d->n_taps;
+	return d->n_taps / 2;
 }
 
 static int impl_native_init(struct resample *r)
 {
 	struct native_data *d;
-	const struct quality *q = &blackman_qualities[DEFAULT_QUALITY];
+	const struct quality *q;
 	double scale;
 	uint32_t c, n_taps, n_phases, filter_size, in_rate, out_rate, gcd, filter_stride;
 	uint32_t history_stride, history_size, oversample;
 
+	r->quality = SPA_CLAMP(r->quality, 0, (int) SPA_N_ELEMENTS(blackman_qualities) - 1);
 	r->free = impl_native_free;
 	r->update_rate = impl_native_update_rate;
 	r->in_len = impl_native_in_len;
 	r->process = impl_native_process;
 	r->reset = impl_native_reset;
 	r->delay = impl_native_delay;
+
+	q = &blackman_qualities[r->quality];
 
 	gcd = calc_gcd(r->i_rate, r->o_rate);
 
@@ -312,8 +326,8 @@ static int impl_native_init(struct resample *r)
 
 	build_filter(d->filter, d->filter_stride, n_taps, n_phases, scale);
 
-	spa_log_debug(r->log, "native %p: in:%d out:%d n_taps:%d n_phases:%d",
-			r, in_rate, out_rate, n_taps, n_phases);
+	spa_log_debug(r->log, "native %p: q:%d in:%d out:%d n_taps:%d n_phases:%d",
+			r, r->quality, in_rate, out_rate, n_taps, n_phases);
 
 	impl_native_reset(r);
 	impl_native_update_rate(r, 1.0);

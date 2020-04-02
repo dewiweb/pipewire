@@ -29,14 +29,14 @@
 
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
+#include <spa/node/io.h>
 #include <spa/pod/filter.h>
 #include <spa/utils/keys.h>
 
 #include "pipewire/pipewire.h"
-#include "pipewire/interfaces.h"
 #include "pipewire/private.h"
 
-#include "pipewire/core.h"
+#include "pipewire/context.h"
 #include "modules/spa/spa-node.h"
 #include "client-node.h"
 #include "transport.h"
@@ -65,6 +65,9 @@
 #define GET_PORT(this,d,p)	(d == SPA_DIRECTION_INPUT ? GET_IN_PORT(this,p) : GET_OUT_PORT(this,p))
 
 #define CHECK_PORT_BUFFER(this,b,p)      (b < p->n_buffers)
+
+extern uint32_t pw_protocol_native0_type_from_v2(struct pw_impl_client *client, uint32_t type);
+extern uint32_t pw_protocol_native0_name_to_v2(struct pw_impl_client *client, const char *name);
 
 struct mem {
 	uint32_t id;
@@ -112,6 +115,8 @@ struct node {
 	struct spa_hook_list hooks;
 	struct spa_callbacks callbacks;
 
+	struct spa_io_position *position;
+
 	struct pw_resource *resource;
 
 	struct spa_source data_source;
@@ -132,11 +137,11 @@ struct node {
 };
 
 struct impl {
-	struct pw_client_node0 this;
+	struct pw_impl_client_node0 this;
 
 	bool client_reuse;
 
-	struct pw_core *core;
+	struct pw_context *context;
 
 	struct node node;
 
@@ -311,7 +316,20 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 
 static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 {
-	return -ENOTSUP;
+	struct node *this = object;
+	int res;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+
+	switch(id) {
+	case SPA_IO_Position:
+		this->position = data;
+		break;
+	default:
+		res = -ENOTSUP;
+		break;
+	}
+	return res;
 }
 
 static inline void do_flush(struct node *this)
@@ -319,6 +337,36 @@ static inline void do_flush(struct node *this)
 	if (spa_system_eventfd_write(this->data_system, this->writefd, 1) < 0)
 		spa_log_warn(this->log, "node %p: error flushing : %s", this, strerror(errno));
 
+}
+
+static int send_clock_update(struct node *this)
+{
+	struct pw_impl_client *client = this->resource->client;
+	uint32_t type = pw_protocol_native0_name_to_v2(client, SPA_TYPE_INFO_NODE_COMMAND_BASE "ClockUpdate");
+	struct timespec ts;
+	int64_t now;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	now = SPA_TIMESPEC_TO_NSEC(&ts);
+	pw_log_trace(NAME " %p: now %"PRIi64, this, now);
+
+	struct spa_command_node0_clock_update cu =
+		SPA_COMMAND_NODE0_CLOCK_UPDATE_INIT(type,
+						SPA_COMMAND_NODE0_CLOCK_UPDATE_TIME |
+						SPA_COMMAND_NODE0_CLOCK_UPDATE_SCALE |
+						SPA_COMMAND_NODE0_CLOCK_UPDATE_STATE |
+						SPA_COMMAND_NODE0_CLOCK_UPDATE_LATENCY,   /* change_mask */
+						SPA_USEC_PER_SEC,       /* rate */
+						now / SPA_NSEC_PER_USEC,       /* ticks */
+						now,       /* monotonic_time */
+						0,       /* offset */
+						(1 << 16) | 1,   /* scale */
+						SPA_CLOCK0_STATE_RUNNING, /* state */
+						SPA_COMMAND_NODE0_CLOCK_UPDATE_FLAG_LIVE,       /* flags */
+						0);      /* latency */
+
+	pw_client_node0_resource_command(this->resource, this->seq, (const struct spa_command*)&cu);
+	return SPA_RESULT_RETURN_ASYNC(this->seq++);
 }
 
 static int impl_node_send_command(void *object, const struct spa_command *command)
@@ -330,6 +378,10 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 
 	if (this->resource == NULL)
 		return -EIO;
+
+	if (SPA_NODE_COMMAND_ID(command) == SPA_NODE_COMMAND_Start) {
+		send_clock_update(this);
+	}
 
 	pw_client_node0_resource_command(this->resource, this->seq, command);
 	return SPA_RESULT_RETURN_ASYNC(this->seq++);
@@ -366,11 +418,9 @@ impl_node_sync(void *object, int seq)
 	return this->init_pending;
 }
 
-extern uint32_t pw_protocol_native0_type_from_v2(struct pw_client *client, uint32_t type);
-extern uint32_t pw_protocol_native0_type_to_v2(struct pw_client *client, uint32_t type);
 
-extern struct spa_pod *pw_protocol_native0_pod_from_v2(struct pw_client *client, const struct spa_pod *pod);
-extern int pw_protocol_native0_pod_to_v2(struct pw_client *client, const struct spa_pod *pod,
+extern struct spa_pod *pw_protocol_native0_pod_from_v2(struct pw_impl_client *client, const struct spa_pod *pod);
+extern int pw_protocol_native0_pod_to_v2(struct pw_impl_client *client, const struct spa_pod *pod,
 		struct spa_pod_builder *b);
 
 static void
@@ -600,7 +650,7 @@ impl_node_port_set_io(void *object,
 
 
 	if (data) {
-		if ((mem = pw_mempool_find_ptr(impl->core->pool, data)) == NULL)
+		if ((mem = pw_mempool_find_ptr(impl->context->pool, data)) == NULL)
 			return -EINVAL;
 
 		mem_offset = SPA_PTRDIFF(data, mem->map->ptr);
@@ -668,7 +718,7 @@ impl_node_port_use_buffers(void *object,
 		struct buffer *b = &port->buffers[i];
 		struct pw_memblock *mem;
 		struct mem *m;
-		size_t data_size, size;
+		size_t data_size;
 		void *baseptr;
 
 		b->outbuf = buffers[i];
@@ -683,7 +733,7 @@ impl_node_port_use_buffers(void *object,
 		else
 			return -EINVAL;
 
-		if ((mem = pw_mempool_find_ptr(impl->core->pool, baseptr)) == NULL)
+		if ((mem = pw_mempool_find_ptr(impl->context->pool, baseptr)) == NULL)
 			return -EINVAL;
 
 		data_size = 0;
@@ -709,7 +759,6 @@ impl_node_port_use_buffers(void *object,
 			memcpy(&b->buffer.metas[j], &buffers[i]->metas[j], sizeof(struct spa_meta));
 		b->buffer.n_metas = j;
 
-		size = 0;
 		for (j = 0; j < buffers[i]->n_datas; j++) {
 			struct spa_data *d = &buffers[i]->datas[j];
 
@@ -720,8 +769,7 @@ impl_node_port_use_buffers(void *object,
 				m = ensure_mem(impl, d->fd, d->type, d->flags);
 				b->buffer.datas[j].data = SPA_UINT32_TO_PTR(m->id);
 			} else if (d->type == SPA_DATA_MemPtr) {
-				b->buffer.datas[j].data = SPA_INT_TO_PTR(size);
-				size += d->maxsize;
+				b->buffer.datas[j].data = SPA_INT_TO_PTR(SPA_PTRDIFF(d->data, baseptr));
 			} else {
 				b->buffer.datas[j].type = SPA_ID_INVALID;
 				b->buffer.datas[j].data = 0;
@@ -806,6 +854,9 @@ static int impl_node_process_input(struct spa_node *node)
 	return res;
 }
 
+#if 0
+/** this is used for clients providing data to pipewire and currently
+ * not supported in the compat layer */
 static int impl_node_process_output(struct spa_node *node)
 {
 	struct node *this;
@@ -841,12 +892,13 @@ static int impl_node_process_output(struct spa_node *node)
 
 	return SPA_STATUS_OK;
 }
+#endif
 
 static int impl_node_process(void *object)
 {
 	struct node *this = object;
 	struct impl *impl = this->impl;
-	struct pw_node *n = impl->this.node;
+	struct pw_impl_node *n = impl->this.node;
 
 	return impl_node_process_input(n->node);
 }
@@ -904,15 +956,23 @@ static void setup_transport(struct impl *impl)
 {
 	struct node *this = &impl->node;
 	uint32_t max_inputs = 0, max_outputs = 0, n_inputs = 0, n_outputs = 0;
+	struct spa_dict_item items[1];
 
 	n_inputs = this->n_inputs;
 	max_inputs = this->info.max_input_ports == 0 ? this->n_inputs : this->info.max_input_ports;
 	n_outputs = this->n_outputs;
 	max_outputs = this->info.max_output_ports == 0 ? this->n_outputs : this->info.max_output_ports;
 
-	impl->transport = pw_client_node0_transport_new(impl->core, max_inputs, max_outputs);
+	impl->transport = pw_client_node0_transport_new(impl->context, max_inputs, max_outputs);
 	impl->transport->area->n_input_ports = n_inputs;
 	impl->transport->area->n_output_ports = n_outputs;
+
+	if (n_inputs > 0) {
+		items[0] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Stream/Input/Video");
+	} else {
+		items[0] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Stream/Output/Video");
+	}
+	pw_impl_node_update_properties(impl->this.node, &SPA_DICT_INIT(items, 1));
 }
 
 static void
@@ -1001,18 +1061,25 @@ client_node0_port_update(void *data,
 static void client_node0_set_active(void *data, bool active)
 {
 	struct impl *impl = data;
-	pw_node_set_active(impl->this.node, active);
+	pw_impl_node_set_active(impl->this.node, active);
 }
 
 static void client_node0_event(void *data, struct spa_event *event)
 {
 	struct impl *impl = data;
 	struct node *this = &impl->node;
-	spa_node_emit_event(&this->hooks, event);
+
+	switch (SPA_EVENT_TYPE(event)) {
+	case SPA_NODE0_EVENT_RequestClockUpdate:
+		send_clock_update(this);
+		break;
+	default:
+		spa_node_emit_event(&this->hooks, event);
+	}
 }
 
-static struct pw_client_node0_proxy_methods client_node0_methods = {
-	PW_VERSION_CLIENT_NODE0_PROXY_METHODS,
+static struct pw_client_node0_methods client_node0_methods = {
+	PW_VERSION_CLIENT_NODE0_METHODS,
 	.done = client_node0_done,
 	.update = client_node0_update,
 	.port_update = client_node0_port_update,
@@ -1071,21 +1138,10 @@ node_init(struct node *this,
 	  const struct spa_support *support,
 	  uint32_t n_support)
 {
-	uint32_t i;
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
+	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataLoop:
-			this->data_loop = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataSystem:
-			this->data_system = support[i].data;
-			break;
-		}
-	}
 	if (this->data_loop == NULL) {
 		spa_log_error(this->log, "a data-loop is needed");
 		return -EINVAL;
@@ -1140,7 +1196,7 @@ static int do_remove_source(struct spa_loop *loop,
 static void client_node0_resource_destroy(void *data)
 {
 	struct impl *impl = data;
-	struct pw_client_node0 *this = &impl->this;
+	struct pw_impl_client_node0 *this = &impl->this;
 	struct node *node = &impl->node;
 
 	pw_log_debug("client-node %p: destroy", impl);
@@ -1158,14 +1214,14 @@ static void client_node0_resource_destroy(void *data)
 				true,
 				&node->data_source);
 	}
-	pw_node_destroy(this->node);
+	pw_impl_node_destroy(this->node);
 }
 
 static void node_initialized(void *data)
 {
 	struct impl *impl = data;
-	struct pw_client_node0 *this = &impl->this;
-	struct pw_node *node = this->node;
+	struct pw_impl_client_node0 *this = &impl->this;
+	struct pw_impl_node *node = this->node;
 	struct spa_system *data_system = impl->node.data_system;
 
 	if (this->resource == NULL)
@@ -1182,7 +1238,7 @@ static void node_initialized(void *data)
 	pw_log_debug("client-node %p: transport fd %d %d", node, impl->fds[0], impl->fds[1]);
 
 	pw_client_node0_resource_transport(this->resource,
-					  pw_global_get_id(pw_node_get_global(node)),
+					  pw_global_get_id(pw_impl_node_get_global(node)),
 					  impl->other_fds[0],
 					  impl->other_fds[1],
 					  impl->transport);
@@ -1210,8 +1266,8 @@ static void node_free(void *data)
 	free(impl);
 }
 
-static const struct pw_node_events node_events = {
-	PW_VERSION_NODE_EVENTS,
+static const struct pw_impl_node_events node_events = {
+	PW_VERSION_IMPL_NODE_EVENTS,
 	.free = node_free,
 	.initialized = node_initialized,
 };
@@ -1226,7 +1282,8 @@ static void convert_properties(struct pw_properties *properties)
 	struct {
 		const char *from, *to;
 	} props[] = {
-		{ "pipewire.autoconnect", PW_KEY_NODE_AUTOCONNECT, }
+		{ "pipewire.autoconnect", PW_KEY_NODE_AUTOCONNECT, },
+		{ "pipewire.target.node", PW_KEY_NODE_TARGET, }
 	};
 	uint32_t i;
 	const char *str;
@@ -1246,17 +1303,17 @@ static void convert_properties(struct pw_properties *properties)
  * \param properties extra properties
  * \return a newly allocated client node
  *
- * Create a new \ref pw_node.
+ * Create a new \ref pw_impl_node.
  *
- * \memberof pw_client_node
+ * \memberof pw_impl_client_node
  */
-struct pw_client_node0 *pw_client_node0_new(struct pw_resource *resource,
+struct pw_impl_client_node0 *pw_impl_client_node0_new(struct pw_resource *resource,
 					  struct pw_properties *properties)
 {
 	struct impl *impl;
-	struct pw_client_node0 *this;
-	struct pw_client *client = pw_resource_get_client(resource);
-	struct pw_core *core = pw_client_get_core(client);
+	struct pw_impl_client_node0 *this;
+	struct pw_impl_client *client = pw_resource_get_client(resource);
+	struct pw_context *context = pw_impl_client_get_context(client);
 	const struct spa_support *support;
 	uint32_t n_support;
 	const char *name;
@@ -1279,11 +1336,11 @@ struct pw_client_node0 *pw_client_node0_new(struct pw_resource *resource,
 
 	pw_properties_setf(properties, PW_KEY_CLIENT_ID, "%d", client->global->id);
 
-	impl->core = core;
+	impl->context = context;
 	impl->fds[0] = impl->fds[1] = -1;
 	pw_log_debug("client-node %p: new", impl);
 
-	support = pw_core_get_support(impl->core, &n_support);
+	support = pw_context_get_support(impl->context, &n_support);
 
 	node_init(&impl->node, NULL, support, n_support);
 	impl->node.impl = impl;
@@ -1293,11 +1350,10 @@ struct pw_client_node0 *pw_client_node0_new(struct pw_resource *resource,
 	if ((name = pw_properties_get(properties, "node.name")) == NULL)
 		name = "client-node";
 	pw_properties_set(properties, PW_KEY_MEDIA_TYPE, "Video");
-	pw_properties_set(properties, SPA_KEY_MEDIA_CLASS, "Stream/Duplex/Video");
 
 	impl->node.resource = resource;
 	this->resource = resource;
-	this->node = pw_spa_node_new(core,
+	this->node = pw_spa_node_new(context,
 				     PW_SPA_NODE_FLAG_ASYNC,
 				     &impl->node.node,
 				     NULL,
@@ -1320,7 +1376,7 @@ struct pw_client_node0 *pw_client_node0_new(struct pw_resource *resource,
 				impl);
 
 
-	pw_node_add_listener(this->node, &impl->node_listener, &node_events, impl);
+	pw_impl_node_add_listener(this->node, &impl->node_listener, &node_events, impl);
 
 	return this;
 
@@ -1335,9 +1391,9 @@ error_exit_free:
 
 /** Destroy a client node
  * \param node the client node to destroy
- * \memberof pw_client_node
+ * \memberof pw_impl_client_node
  */
-void pw_client_node0_destroy(struct pw_client_node0 *node)
+void pw_impl_client_node0_destroy(struct pw_impl_client_node0 *node)
 {
 	pw_resource_destroy(node->resource);
 }

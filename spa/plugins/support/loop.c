@@ -297,10 +297,11 @@ static int loop_iterate(void *object, int timeout)
 	}
 	for (i = 0; i < nfds; i++) {
 		struct spa_source *s = ep[i].data;
-		if (s->rmask && s->fd != -1 && s->loop == loop)
+		if (SPA_LIKELY(s->rmask && s->fd != -1 && s->loop == loop))
 			s->func(s);
 	}
-	process_destroy(impl);
+	if (SPA_UNLIKELY(!spa_list_is_empty(&impl->destroy_list)))
+		process_destroy(impl);
 
 	return nfds;
 }
@@ -478,7 +479,7 @@ static int loop_signal_event(void *object, struct spa_source *source)
 	struct source_impl *impl = SPA_CONTAINER_OF(source, struct source_impl, source);
 	int res;
 
-	if ((res = spa_system_eventfd_write(impl->impl->system, source->fd, 1)) < 0)
+	if (SPA_UNLIKELY((res = spa_system_eventfd_write(impl->impl->system, source->fd, 1)) < 0))
 		spa_log_warn(impl->impl->log, NAME " %p: failed to write event fd %d: %s",
 				source, source->fd, spa_strerror(res));
 	return res;
@@ -490,8 +491,8 @@ static void source_timer_func(struct spa_source *source)
 	uint64_t expirations;
 	int res;
 
-	if ((res = spa_system_timerfd_read(impl->impl->system,
-				source->fd, &expirations)) < 0)
+	if (SPA_UNLIKELY((res = spa_system_timerfd_read(impl->impl->system,
+				source->fd, &expirations)) < 0))
 		spa_log_warn(impl->impl->log, NAME " %p: failed to read timer fd %d: %s",
 				source, source->fd, spa_strerror(res));
 
@@ -547,18 +548,18 @@ loop_update_timer(void *object, struct spa_source *source,
 	int flags = 0, res;
 
 	spa_zero(its);
-	if (value) {
+	if (SPA_LIKELY(value)) {
 		its.it_value = *value;
 	} else if (interval) {
 		its.it_value = *interval;
 		absolute = true;
 	}
-	if (interval)
+	if (SPA_UNLIKELY(interval))
 		its.it_interval = *interval;
-	if (absolute)
+	if (SPA_LIKELY(absolute))
 		flags |= SPA_FD_TIMER_ABSTIME;
 
-	if ((res = spa_system_timerfd_settime(impl->system, source->fd, flags, &its, NULL)) < 0)
+	if (SPA_UNLIKELY((res = spa_system_timerfd_settime(impl->system, source->fd, flags, &its, NULL)) < 0))
 		return res;
 
 	return 0;
@@ -664,7 +665,7 @@ static const struct spa_loop_utils_methods impl_loop_utils = {
 	.destroy_source = loop_destroy_source,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *impl;
 
@@ -673,19 +674,15 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	impl = (struct impl *) handle;
 
-	switch (type) {
-	case SPA_TYPE_INTERFACE_Loop:
+	if (strcmp(type, SPA_TYPE_INTERFACE_Loop) == 0)
 		*interface = &impl->loop;
-		break;
-	case SPA_TYPE_INTERFACE_LoopControl:
+	else if (strcmp(type, SPA_TYPE_INTERFACE_LoopControl) == 0)
 		*interface = &impl->control;
-		break;
-	case SPA_TYPE_INTERFACE_LoopUtils:
+	else if (strcmp(type, SPA_TYPE_INTERFACE_LoopUtils) == 0)
 		*interface = &impl->utils;
-		break;
-	default:
+	else
 		return -ENOENT;
-	}
+
 	return 0;
 }
 
@@ -724,7 +721,6 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct impl *impl;
-	uint32_t i;
 	int res;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
@@ -747,16 +743,9 @@ impl_init(const struct spa_handle_factory *factory,
 			SPA_VERSION_LOOP_UTILS,
 			&impl_loop_utils, impl);
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			impl->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_System:
-			impl->system = support[i].data;
-			break;
-		}
-	}
+	impl->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	impl->system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_System);
+
 	if (impl->system == NULL) {
 		spa_log_error(impl->log, NAME " %p: a System is needed", impl);
 		res = -EINVAL;

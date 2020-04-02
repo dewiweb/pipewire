@@ -30,6 +30,7 @@ extern "C" {
 #endif
 
 #include <errno.h>
+#include <sys/types.h>
 
 #include <spa/pod/pod.h>
 
@@ -151,7 +152,7 @@ static inline int spa_pod_get_bool(const struct spa_pod *pod, bool *value)
 {
 	if (!spa_pod_is_bool(pod))
 		return -EINVAL;
-	*value = SPA_POD_VALUE(struct spa_pod_bool, pod);
+	*value = !!SPA_POD_VALUE(struct spa_pod_bool, pod);
 	return 0;
 }
 

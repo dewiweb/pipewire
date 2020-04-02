@@ -28,60 +28,57 @@ extern "C" {
 #include <spa/param/param.h>
 #include <spa/node/node.h>
 
-#include <pipewire/introspect.h>
-#include <pipewire/proxy.h>
+#include <pipewire/pipewire.h>
 
 /** Core */
 
 #define PW_VERSION_CORE_V0			0
 
-#define PW_CORE_PROXY_V0_METHOD_HELLO		0
-#define PW_CORE_PROXY_V0_METHOD_UPDATE_TYPES	1
-#define PW_CORE_PROXY_V0_METHOD_SYNC		2
-#define PW_CORE_PROXY_V0_METHOD_GET_REGISTRY	3
-#define PW_CORE_PROXY_V0_METHOD_CLIENT_UPDATE	4
-#define PW_CORE_PROXY_V0_METHOD_PERMISSIONS	5
-#define PW_CORE_PROXY_V0_METHOD_CREATE_OBJECT	6
-#define PW_CORE_PROXY_V0_METHOD_DESTROY		7
-#define PW_CORE_PROXY_V0_METHOD_NUM		8
+#define PW_CORE_V0_METHOD_HELLO		0
+#define PW_CORE_V0_METHOD_UPDATE_TYPES	1
+#define PW_CORE_V0_METHOD_SYNC		2
+#define PW_CORE_V0_METHOD_GET_REGISTRY	3
+#define PW_CORE_V0_METHOD_CLIENT_UPDATE	4
+#define PW_CORE_V0_METHOD_PERMISSIONS	5
+#define PW_CORE_V0_METHOD_CREATE_OBJECT	6
+#define PW_CORE_V0_METHOD_DESTROY		7
+#define PW_CORE_V0_METHOD_NUM		8
 
-#if 0
 /**
  * Key to update default permissions of globals without specific
  * permissions. value is "[r][w][x]" */
-#define PW_CORE_PROXY_PERMISSIONS_DEFAULT	"permissions.default"
+#define PW_CORE_PERMISSIONS_DEFAULT	"permissions.default"
 
 /**
  * Key to update specific permissions of a global. If the global
  * did not have specific permissions, it will first be assigned
  * the default permissions before it is updated.
  * Value is "<global-id>:[r][w][x]"*/
-#define PW_CORE_PROXY_PERMISSIONS_GLOBAL	"permissions.global"
+#define PW_CORE_PERMISSIONS_GLOBAL	"permissions.global"
 
 /**
  * Key to update specific permissions of all existing globals.
- * This is equivalent to using \ref PW_CORE_PROXY_PERMISSIONS_GLOBAL
+ * This is equivalent to using \ref PW_CORE_PERMISSIONS_GLOBAL
  * on each global id individually that did not have specific
  * permissions.
  * Value is "[r][w][x]" */
-#define PW_CORE_PROXY_PERMISSIONS_EXISTING	"permissions.existing"
+#define PW_CORE_PERMISSIONS_EXISTING	"permissions.existing"
 
 #define PW_LINK_OUTPUT_NODE_ID	"link.output_node.id"
 #define PW_LINK_OUTPUT_PORT_ID	"link.output_port.id"
 #define PW_LINK_INPUT_NODE_ID	"link.input_node.id"
 #define PW_LINK_INPUT_PORT_ID	"link.input_port.id"
-#endif
 
 /**
- * \struct pw_core_proxy_v0_methods
+ * \struct pw_core_v0_methods
  * \brief Core methods
  *
  * The core global object. This is a singleton object used for
  * creating new objects in the remote PipeWire intance. It is
  * also used for internal features.
  */
-struct pw_core_proxy_v0_methods {
-#define PW_VERSION_CORE_PROXY_V0_METHODS	0
+struct pw_core_v0_methods {
+#define PW_VERSION_CORE_V0_METHODS	0
 	uint32_t version;
 	/**
 	 * Start a conversation with the server. This will send
@@ -167,19 +164,19 @@ struct pw_core_proxy_v0_methods {
 	void (*destroy) (void *object, uint32_t id);
 };
 
-#define PW_CORE_PROXY_V0_EVENT_UPDATE_TYPES 0
-#define PW_CORE_PROXY_V0_EVENT_DONE         1
-#define PW_CORE_PROXY_V0_EVENT_ERROR        2
-#define PW_CORE_PROXY_V0_EVENT_REMOVE_ID    3
-#define PW_CORE_PROXY_V0_EVENT_INFO         4
-#define PW_CORE_PROXY_V0_EVENT_NUM          5
+#define PW_CORE_V0_EVENT_UPDATE_TYPES 0
+#define PW_CORE_V0_EVENT_DONE         1
+#define PW_CORE_V0_EVENT_ERROR        2
+#define PW_CORE_V0_EVENT_REMOVE_ID    3
+#define PW_CORE_V0_EVENT_INFO         4
+#define PW_CORE_V0_EVENT_NUM          5
 
-/** \struct pw_core_proxy_v0_events
+/** \struct pw_core_v0_events
  *  \brief Core events
  *  \ingroup pw_core_interface The pw_core interface
  */
-struct pw_core_proxy_v0_events {
-#define PW_VERSION_CORE_PROXY_V0_EVENTS		0
+struct pw_core_v0_events {
+#define PW_VERSION_CORE_V0_EVENTS		0
 	uint32_t version;
 	/**
 	 * Update the type map
@@ -234,11 +231,11 @@ struct pw_core_proxy_v0_events {
 	void (*info) (void *object, struct pw_core_info *info);
 };
 
-#define pw_core_resource_v0_update_types(r,...) pw_resource_notify(r,struct pw_core_proxy_v0_events,update_types,__VA_ARGS__)
-#define pw_core_resource_v0_done(r,...)         pw_resource_notify(r,struct pw_core_proxy_v0_events,done,__VA_ARGS__)
-#define pw_core_resource_v0_error(r,...)        pw_resource_notify(r,struct pw_core_proxy_v0_events,error,__VA_ARGS__)
-#define pw_core_resource_v0_remove_id(r,...)    pw_resource_notify(r,struct pw_core_proxy_v0_events,remove_id,__VA_ARGS__)
-#define pw_core_resource_v0_info(r,...)         pw_resource_notify(r,struct pw_core_proxy_v0_events,info,__VA_ARGS__)
+#define pw_core_resource_v0_update_types(r,...) pw_resource_notify(r,struct pw_core_v0_events,update_types,__VA_ARGS__)
+#define pw_core_resource_v0_done(r,...)         pw_resource_notify(r,struct pw_core_v0_events,done,__VA_ARGS__)
+#define pw_core_resource_v0_error(r,...)        pw_resource_notify(r,struct pw_core_v0_events,error,__VA_ARGS__)
+#define pw_core_resource_v0_remove_id(r,...)    pw_resource_notify(r,struct pw_core_v0_events,remove_id,__VA_ARGS__)
+#define pw_core_resource_v0_info(r,...)         pw_resource_notify(r,struct pw_core_v0_events,info,__VA_ARGS__)
 
 
 #define PW_VERSION_REGISTRY_V0			0
@@ -274,12 +271,12 @@ struct pw_core_proxy_v0_events {
  * can, for example, hide certain existing or new objects or limit
  * the access permissions on an object.
  */
-#define PW_REGISTRY_PROXY_V0_METHOD_BIND	0
-#define PW_REGISTRY_PROXY_V0_METHOD_NUM		1
+#define PW_REGISTRY_V0_METHOD_BIND	0
+#define PW_REGISTRY_V0_METHOD_NUM		1
 
 /** Registry methods */
-struct pw_registry_proxy_v0_methods {
-#define PW_VERSION_REGISTRY_PROXY_V0_METHODS	0
+struct pw_registry_v0_methods {
+#define PW_VERSION_REGISTRY_V0_METHODS	0
 	uint32_t version;
 	/**
 	 * Bind to a global object
@@ -296,13 +293,13 @@ struct pw_registry_proxy_v0_methods {
 	void (*bind) (void *object, uint32_t id, uint32_t type, uint32_t version, uint32_t new_id);
 };
 
-#define PW_REGISTRY_PROXY_V0_EVENT_GLOBAL             0
-#define PW_REGISTRY_PROXY_V0_EVENT_GLOBAL_REMOVE      1
-#define PW_REGISTRY_PROXY_V0_EVENT_NUM                2
+#define PW_REGISTRY_V0_EVENT_GLOBAL             0
+#define PW_REGISTRY_V0_EVENT_GLOBAL_REMOVE      1
+#define PW_REGISTRY_V0_EVENT_NUM                2
 
 /** Registry events */
-struct pw_registry_proxy_v0_events {
-#define PW_VERSION_REGISTRY_PROXY_V0_EVENTS	0
+struct pw_registry_v0_events {
+#define PW_VERSION_REGISTRY_V0_EVENTS	0
 	uint32_t version;
 	/**
 	 * Notify of a new global object
@@ -332,18 +329,18 @@ struct pw_registry_proxy_v0_events {
 	void (*global_remove) (void *object, uint32_t id);
 };
 
-#define pw_registry_resource_v0_global(r,...)        pw_resource_notify(r,struct pw_registry_proxy_v0_events,global,__VA_ARGS__)
-#define pw_registry_resource_v0_global_remove(r,...) pw_resource_notify(r,struct pw_registry_proxy_v0_events,global_remove,__VA_ARGS__)
+#define pw_registry_resource_v0_global(r,...)        pw_resource_notify(r,struct pw_registry_v0_events,global,__VA_ARGS__)
+#define pw_registry_resource_v0_global_remove(r,...) pw_resource_notify(r,struct pw_registry_v0_events,global_remove,__VA_ARGS__)
 
 
 #define PW_VERSION_MODULE_V0			0
 
-#define PW_MODULE_PROXY_V0_EVENT_INFO		0
-#define PW_MODULE_PROXY_V0_EVENT_NUM		1
+#define PW_MODULE_V0_EVENT_INFO		0
+#define PW_MODULE_V0_EVENT_NUM		1
 
 /** Module events */
-struct pw_module_proxy_v0_events {
-#define PW_VERSION_MODULE_PROXY_V0_EVENTS	0
+struct pw_module_v0_events {
+#define PW_VERSION_MODULE_V0_EVENTS	0
 	uint32_t version;
 	/**
 	 * Notify module info
@@ -353,17 +350,17 @@ struct pw_module_proxy_v0_events {
 	void (*info) (void *object, struct pw_module_info *info);
 };
 
-#define pw_module_resource_v0_info(r,...)	pw_resource_notify(r,struct pw_module_proxy_v0_events,info,__VA_ARGS__)
+#define pw_module_resource_v0_info(r,...)	pw_resource_notify(r,struct pw_module_v0_events,info,__VA_ARGS__)
 
 #define PW_VERSION_NODE_V0		0
 
-#define PW_NODE_PROXY_V0_EVENT_INFO	0
-#define PW_NODE_PROXY_V0_EVENT_PARAM	1
-#define PW_NODE_PROXY_V0_EVENT_NUM	2
+#define PW_NODE_V0_EVENT_INFO	0
+#define PW_NODE_V0_EVENT_PARAM	1
+#define PW_NODE_V0_EVENT_NUM	2
 
 /** Node events */
-struct pw_node_proxy_v0_events {
-#define PW_VERSION_NODE_PROXY_V0_EVENTS	0
+struct pw_node_v0_events {
+#define PW_VERSION_NODE_V0_EVENTS	0
 	uint32_t version;
 	/**
 	 * Notify node info
@@ -386,15 +383,15 @@ struct pw_node_proxy_v0_events {
 		       const struct spa_pod *param);
 };
 
-#define pw_node_resource_v0_info(r,...) pw_resource_notify(r,struct pw_node_proxy_v0_events,info,__VA_ARGS__)
-#define pw_node_resource_v0_param(r,...) pw_resource_notify(r,struct pw_node_proxy_v0_events,param,__VA_ARGS__)
+#define pw_node_resource_v0_info(r,...) pw_resource_notify(r,struct pw_node_v0_events,info,__VA_ARGS__)
+#define pw_node_resource_v0_param(r,...) pw_resource_notify(r,struct pw_node_v0_events,param,__VA_ARGS__)
 
-#define PW_NODE_PROXY_V0_METHOD_ENUM_PARAMS	0
-#define PW_NODE_PROXY_V0_METHOD_NUM		1
+#define PW_NODE_V0_METHOD_ENUM_PARAMS	0
+#define PW_NODE_V0_METHOD_NUM		1
 
 /** Node methods */
-struct pw_node_proxy_v0_methods {
-#define PW_VERSION_NODE_PROXY_V0_METHODS	0
+struct pw_node_v0_methods {
+#define PW_VERSION_NODE_V0_METHODS	0
 	uint32_t version;
 	/**
 	 * Enumerate node parameters
@@ -402,7 +399,7 @@ struct pw_node_proxy_v0_methods {
 	 * Start enumeration of node parameters. For each param, a
 	 * param event will be emited.
 	 *
-	 * \param id the parameter id to enum or SPA_ID_INVALID for all
+	 * \param id the parameter id to enum or PW_ID_ANY for all
 	 * \param start the start index or 0 for the first param
 	 * \param num the maximum number of params to retrieve
 	 * \param filter a param filter or NULL
@@ -413,13 +410,13 @@ struct pw_node_proxy_v0_methods {
 
 #define PW_VERSION_PORT_V0		0
 
-#define PW_PORT_PROXY_V0_EVENT_INFO	0
-#define PW_PORT_PROXY_V0_EVENT_PARAM	1
-#define PW_PORT_PROXY_V0_EVENT_NUM		2
+#define PW_PORT_V0_EVENT_INFO	0
+#define PW_PORT_V0_EVENT_PARAM	1
+#define PW_PORT_V0_EVENT_NUM		2
 
 /** Port events */
-struct pw_port_proxy_v0_events {
-#define PW_VERSION_PORT_PROXY_V0_EVENTS	0
+struct pw_port_v0_events {
+#define PW_VERSION_PORT_V0_EVENTS	0
 	uint32_t version;
 	/**
 	 * Notify port info
@@ -442,15 +439,15 @@ struct pw_port_proxy_v0_events {
 		       const struct spa_pod *param);
 };
 
-#define pw_port_resource_v0_info(r,...) pw_resource_notify(r,struct pw_port_proxy_v0_events,info,__VA_ARGS__)
-#define pw_port_resource_v0_param(r,...) pw_resource_notify(r,struct pw_port_proxy_v0_events,param,__VA_ARGS__)
+#define pw_port_resource_v0_info(r,...) pw_resource_notify(r,struct pw_port_v0_events,info,__VA_ARGS__)
+#define pw_port_resource_v0_param(r,...) pw_resource_notify(r,struct pw_port_v0_events,param,__VA_ARGS__)
 
-#define PW_PORT_PROXY_V0_METHOD_ENUM_PARAMS	0
-#define PW_PORT_PROXY_V0_METHOD_NUM		1
+#define PW_PORT_V0_METHOD_ENUM_PARAMS	0
+#define PW_PORT_V0_METHOD_NUM		1
 
 /** Port methods */
-struct pw_port_proxy_v0_methods {
-#define PW_VERSION_PORT_PROXY_V0_METHODS	0
+struct pw_port_v0_methods {
+#define PW_VERSION_PORT_V0_METHODS	0
 	uint32_t version;
 	/**
 	 * Enumerate port parameters
@@ -467,14 +464,14 @@ struct pw_port_proxy_v0_methods {
 			const struct spa_pod *filter);
 };
 
-#define PW_VERSION_FACTORY_V0			0
+#define PW_VERSION_FACTORY_V0		0
 
-#define PW_FACTORY_PROXY_V0_EVENT_INFO		0
-#define PW_FACTORY_PROXY_V0_EVENT_NUM		1
+#define PW_FACTORY_V0_EVENT_INFO	0
+#define PW_FACTORY_V0_EVENT_NUM		1
 
 /** Factory events */
-struct pw_factory_proxy_v0_events {
-#define PW_VERSION_FACTORY_PROXY_V0_EVENTS	0
+struct pw_factory_v0_events {
+#define PW_VERSION_FACTORY_V0_EVENTS	0
 	uint32_t version;
 	/**
 	 * Notify factory info
@@ -484,16 +481,16 @@ struct pw_factory_proxy_v0_events {
 	void (*info) (void *object, struct pw_factory_info *info);
 };
 
-#define pw_factory_resource_v0_info(r,...) pw_resource_notify(r,struct pw_factory_proxy_v0_events,info,__VA_ARGS__)
+#define pw_factory_resource_v0_info(r,...) pw_resource_notify(r,struct pw_factory_v0_events,info,__VA_ARGS__)
 
-#define PW_VERSION_CLIENT_V0			0
+#define PW_VERSION_CLIENT_V0		0
 
-#define PW_CLIENT_PROXY_V0_EVENT_INFO		0
-#define PW_CLIENT_PROXY_V0_EVENT_NUM		1
+#define PW_CLIENT_V0_EVENT_INFO		0
+#define PW_CLIENT_V0_EVENT_NUM		1
 
 /** Client events */
-struct pw_client_proxy_v0_events {
-#define PW_VERSION_CLIENT_PROXY_V0_EVENTS	0
+struct pw_client_v0_events {
+#define PW_VERSION_CLIENT_V0_EVENTS	0
 	uint32_t version;
 	/**
 	 * Notify client info
@@ -503,17 +500,17 @@ struct pw_client_proxy_v0_events {
 	void (*info) (void *object, struct pw_client_info *info);
 };
 
-#define pw_client_resource_v0_info(r,...) pw_resource_notify(r,struct pw_client_proxy_v0_events,info,__VA_ARGS__)
+#define pw_client_resource_v0_info(r,...) pw_resource_notify(r,struct pw_client_v0_events,info,__VA_ARGS__)
 
 
 #define PW_VERSION_LINK_V0		0
 
-#define PW_LINK_PROXY_V0_EVENT_INFO	0
-#define PW_LINK_PROXY_V0_EVENT_NUM	1
+#define PW_LINK_V0_EVENT_INFO	0
+#define PW_LINK_V0_EVENT_NUM	1
 
 /** Link events */
-struct pw_link_proxy_v0_events {
-#define PW_VERSION_LINK_PROXY_V0_EVENTS	0
+struct pw_link_v0_events {
+#define PW_VERSION_LINK_V0_EVENTS	0
 	uint32_t version;
 	/**
 	 * Notify link info
@@ -523,7 +520,7 @@ struct pw_link_proxy_v0_events {
 	void (*info) (void *object, struct pw_link_info *info);
 };
 
-#define pw_link_resource_v0_info(r,...)      pw_resource_notify(r,struct pw_link_proxy_v0_events,info,__VA_ARGS__)
+#define pw_link_resource_v0_info(r,...)      pw_resource_notify(r,struct pw_link_v0_events,info,__VA_ARGS__)
 
 #ifdef __cplusplus
 }  /* extern "C" */

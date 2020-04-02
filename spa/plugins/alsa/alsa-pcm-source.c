@@ -28,6 +28,7 @@
 
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
+#include <spa/node/keys.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
 #include <spa/utils/list.h>
@@ -187,7 +188,7 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	default:
 		return -ENOENT;
 	}
-	spa_alsa_reslave(this);
+	spa_alsa_reassign_follower(this);
 	return 0;
 }
 
@@ -334,17 +335,6 @@ static int impl_node_add_port(void *object, enum spa_direction direction, uint32
 static int impl_node_remove_port(void *object, enum spa_direction direction, uint32_t port_id)
 {
 	return -ENOTSUP;
-}
-
-static void recycle_buffer(struct state *this, uint32_t buffer_id)
-{
-	struct buffer *b = &this->buffers[buffer_id];
-
-	if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_OUT)) {
-		spa_log_trace_fp(this->log, NAME " %p: recycle buffer %u", this, buffer_id);
-		spa_list_append(&this->free, &b->link);
-		SPA_FLAG_CLEAR(b->flags, BUFFER_FLAG_OUT);
-	}
 }
 
 static int
@@ -622,7 +612,7 @@ static int impl_node_port_reuse_buffer(void *object, uint32_t port_id, uint32_t 
 	if (buffer_id >= this->n_buffers)
 		return -EINVAL;
 
-	recycle_buffer(this, buffer_id);
+	spa_alsa_recycle_buffer(this, buffer_id);
 
 	return 0;
 }
@@ -642,18 +632,19 @@ static int impl_node_process(void *object)
 		return SPA_STATUS_HAVE_DATA;
 
 	if (io->buffer_id < this->n_buffers) {
-		recycle_buffer(this, io->buffer_id);
+		spa_alsa_recycle_buffer(this, io->buffer_id);
 		io->buffer_id = SPA_ID_INVALID;
 	}
 
-	if (spa_list_is_empty(&this->ready) && this->slaved)
+	if (spa_list_is_empty(&this->ready) && this->following)
 		spa_alsa_read(this, 0);
 
-	if (spa_list_is_empty(&this->ready) || !this->slaved)
+	if (spa_list_is_empty(&this->ready) || !this->following)
 		return SPA_STATUS_OK;
 
 	b = spa_list_first(&this->ready, struct buffer, link);
 	spa_list_remove(&b->link);
+	SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUT);
 
 	spa_log_trace_fp(this->log, NAME " %p: dequeue buffer %d", this, b->id);
 
@@ -682,7 +673,7 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct state *this;
 
@@ -691,7 +682,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct state *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Node)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -729,19 +720,10 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct state *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataSystem:
-			this->data_system = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataLoop:
-			this->data_loop = support[i].data;
-			break;
-		}
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
+	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
+
 	if (this->data_loop == NULL) {
 		spa_log_error(this->log, NAME" %p: a data loop is needed", this);
 		return -EINVAL;

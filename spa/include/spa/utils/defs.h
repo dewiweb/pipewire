@@ -143,12 +143,14 @@ struct spa_fraction {
 #define SPA_DEPRECATED __attribute__ ((deprecated))
 #define SPA_EXPORT __attribute__((visibility("default")))
 #define SPA_SENTINEL __attribute__((__sentinel__))
+#define SPA_UNUSED __attribute__ ((unused))
 #else
 #define SPA_PRINTF_FUNC(fmt, arg1)
 #define SPA_ALIGNED(align)
 #define SPA_DEPRECATED
 #define SPA_EXPORT
 #define SPA_SENTINEL
+#define SPA_UNUSED
 #endif
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
@@ -176,19 +178,25 @@ struct spa_fraction {
 #endif
 #endif
 
-#define SPA_STRINGIFY_1(x...)	#x
-#define SPA_STRINGIFY(x...)	SPA_STRINGIFY_1(x)
+#define SPA_STRINGIFY_1(...)	#__VA_ARGS__
+#define SPA_STRINGIFY(...)	SPA_STRINGIFY_1(__VA_ARGS__)
 
 #define spa_return_if_fail(expr)					\
 	do {								\
-		if (SPA_UNLIKELY(!(expr)))				\
+		if (SPA_UNLIKELY(!(expr))) {				\
+			fprintf(stderr, "'%s' failed at %s:%u %s()\n",	\
+				#expr , __FILE__, __LINE__, __func__);	\
 			return;						\
+		}							\
 	} while(false)
 
 #define spa_return_val_if_fail(expr, val)				\
 	do {								\
-		if (SPA_UNLIKELY(!(expr)))				\
+		if (SPA_UNLIKELY(!(expr))) {				\
+			fprintf(stderr, "'%s' failed at %s:%u %s()\n",	\
+				#expr , __FILE__, __LINE__, __func__);	\
 			return (val);					\
+		}							\
 	} while(false)
 
 /* spa_assert_se() is an assert which guarantees side effects of x,
@@ -196,7 +204,7 @@ struct spa_fraction {
 #define spa_assert_se(expr)						\
 	do {								\
 		if (SPA_UNLIKELY(!(expr)))				\
-			fprintf(stderr, "'%s' failed at %s:%u %s()",	\
+			fprintf(stderr, "'%s' failed at %s:%u %s()\n",	\
 				#expr , __FILE__, __LINE__, __func__);	\
 			abort();					\
 	} while (false)
@@ -204,7 +212,7 @@ struct spa_fraction {
 #define spa_assert(expr)						\
 	do {								\
 		if (SPA_UNLIKELY(!(expr))) {				\
-			fprintf(stderr, "'%s' failed at %s:%u %s()",	\
+			fprintf(stderr, "'%s' failed at %s:%u %s()\n",	\
 				#expr , __FILE__, __LINE__, __func__);	\
 			abort();					\
 		}							\
@@ -212,7 +220,7 @@ struct spa_fraction {
 
 #define spa_assert_not_reached()						\
 	do {									\
-		fprintf(stderr, "Code should not be reached at %s:%u %s()",	\
+		fprintf(stderr, "Code should not be reached at %s:%u %s()\n",	\
 				__FILE__, __LINE__, __func__);			\
 		abort();							\
 	} while (false)
@@ -240,6 +248,14 @@ struct spa_fraction {
 #define spa_memcpy(d,s,n)	memcpy(d,s,n)
 #define spa_memmove(d,s,n)	memmove(d,s,n)
 #endif
+
+#define spa_aprintf(_fmt, ...)						\
+({									\
+	char *_strp;							\
+	if (asprintf(&(_strp), (_fmt), ## __VA_ARGS__ ) == -1)		\
+		_strp = NULL;						\
+	_strp;								\
+})
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -39,7 +39,6 @@ static void test_create(struct pw_protocol_native_connection *conn)
 
 	res = pw_protocol_native_connection_get_next(conn, &msg);
 	spa_assert(res != 1);
-	spa_assert(msg != NULL);
 
 	res = pw_protocol_native_connection_get_fd(conn, 0);
 	spa_assert(res == -ENOENT);
@@ -123,23 +122,23 @@ static void test_read_write(struct pw_protocol_native_connection *in,
 int main(int argc, char *argv[])
 {
 	struct pw_main_loop *loop;
-	struct pw_core *core;
+	struct pw_context *context;
 	struct pw_protocol_native_connection *in, *out;
 	int fds[2];
 
 	pw_init(&argc, &argv);
 
 	loop = pw_main_loop_new(NULL);
-	core = pw_core_new(pw_main_loop_get_loop(loop), NULL, 0);
+	context = pw_context_new(pw_main_loop_get_loop(loop), NULL, 0);
 
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) {
 		spa_assert_not_reached();
 		return -1;
 	}
 
-	in = pw_protocol_native_connection_new(core, fds[0]);
+	in = pw_protocol_native_connection_new(context, fds[0]);
 	spa_assert(in != NULL);
-	out = pw_protocol_native_connection_new(core, fds[1]);
+	out = pw_protocol_native_connection_new(context, fds[1]);
 	spa_assert(out != NULL);
 
 	test_create(in);

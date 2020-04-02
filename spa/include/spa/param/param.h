@@ -45,6 +45,9 @@ enum spa_param_type {
 	SPA_PARAM_Profile,		/**< profile configuration as SPA_TYPE_OBJECT_ParamProfile */
 	SPA_PARAM_EnumPortConfig,	/**< port configuration enumeration as SPA_TYPE_OBJECT_ParamPortConfig */
 	SPA_PARAM_PortConfig,		/**< port configuration as SPA_TYPE_OBJECT_ParamPortConfig */
+	SPA_PARAM_EnumRoute,		/**< routing enumeration as SPA_TYPE_OBJECT_ParamRoute */
+	SPA_PARAM_Route,		/**< routing configuration as SPA_TYPE_OBJECT_ParamRoute */
+	SPA_PARAM_Control,		/**< Control parameter, a SPA_TYPE_Sequence */
 };
 
 /** information about a parameter */
@@ -56,7 +59,9 @@ struct spa_param_info {
 #define SPA_PARAM_INFO_WRITE		(1<<2)
 #define SPA_PARAM_INFO_READWRITE	(SPA_PARAM_INFO_WRITE|SPA_PARAM_INFO_READ)
 	uint32_t flags;
-	uint32_t padding[6];
+	uint32_t user;			/**< private user field. You can use this to keep
+					  *  state. */
+	uint32_t padding[5];
 };
 
 #define SPA_PARAM_INFO(id,flags) (struct spa_param_info){ (id), (flags) }
@@ -69,6 +74,7 @@ enum spa_param_buffers {
 	SPA_PARAM_BUFFERS_size,		/**< size of a data block memory (Int)*/
 	SPA_PARAM_BUFFERS_stride,	/**< stride of data block memory (Int) */
 	SPA_PARAM_BUFFERS_align,	/**< alignment of data block memory (Int) */
+	SPA_PARAM_BUFFERS_dataType,	/**< possible memory types (Int, mask of enum spa_data_type) */
 };
 
 /** properties for SPA_TYPE_OBJECT_ParamMeta */
@@ -90,6 +96,8 @@ enum spa_param_profile {
 	SPA_PARAM_PROFILE_START,
 	SPA_PARAM_PROFILE_index,	/**< profile index (Int) */
 	SPA_PARAM_PROFILE_name,		/**< profile name (String) */
+	SPA_PARAM_PROFILE_description,	/**< profile description (String) */
+	SPA_PARAM_PROFILE_priority,	/**< profile priority (Int) */
 };
 
 enum spa_param_port_config_mode {
@@ -107,8 +115,27 @@ enum spa_param_port_config {
 	SPA_PARAM_PORT_CONFIG_direction,	/**< direction, input/output (Id enum spa_direction) */
 	SPA_PARAM_PORT_CONFIG_mode,		/**< (Id enum spa_param_port_config_mode) mode */
 	SPA_PARAM_PORT_CONFIG_monitor,		/**< (Bool) enable monitor output ports on input ports */
+	SPA_PARAM_PORT_CONFIG_control,		/**< (Bool) enable control ports */
 	SPA_PARAM_PORT_CONFIG_format,		/**< (Object) format filter */
 };
+
+enum spa_param_route_availability {
+	SPA_PARAM_ROUTE_AVAILABILITY_unknown,	/**< unknown if route is available */
+	SPA_PARAM_ROUTE_AVAILABILITY_no,	/**< route is not available */
+	SPA_PARAM_ROUTE_AVAILABILITY_yes,	/**< route is available */
+};
+
+/** properties for SPA_TYPE_OBJECT_ParamRoute */
+enum spa_param_route {
+	SPA_PARAM_ROUTE_START,
+	SPA_PARAM_ROUTE_index,			/**< index of the routing destination (Int) */
+	SPA_PARAM_ROUTE_name,			/**< name of the routing destination (String) */
+	SPA_PARAM_ROUTE_description,		/**< description of the destination (String) */
+	SPA_PARAM_ROUTE_priority,		/**< priority of the destination (Int) */
+	SPA_PARAM_ROUTE_available,		/**< availability of the destination
+						  *  (Id enum spa_param_route_availability) */
+};
+
 
 #ifdef __cplusplus
 }  /* extern "C" */

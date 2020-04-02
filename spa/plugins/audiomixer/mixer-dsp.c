@@ -315,16 +315,14 @@ static int port_enum_formats(void *object,
 	switch (index) {
 	case 0:
 		if (this->have_format) {
-			*param = spa_format_audio_raw_build(builder, SPA_PARAM_EnumFormat,
-					&this->format.info.raw);
+			*param = spa_format_audio_dsp_build(builder, SPA_PARAM_EnumFormat,
+					&this->format.info.dsp);
 		} else {
 			*param = spa_pod_builder_add_object(builder,
 				SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 				SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
-				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-				SPA_FORMAT_AUDIO_format,   SPA_POD_Id(SPA_AUDIO_FORMAT_F32P),
-				SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(44100, 1, INT32_MAX),
-				SPA_FORMAT_AUDIO_channels, SPA_POD_Int(1));
+				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_dsp),
+				SPA_FORMAT_AUDIO_format,   SPA_POD_Id(SPA_AUDIO_FORMAT_DSP_F32));
 		}
 		break;
 	default:
@@ -373,7 +371,7 @@ next:
 		if (result.index > 0)
 			return 0;
 
-		param = spa_format_audio_raw_build(&b, id, &this->format.info.raw);
+		param = spa_format_audio_dsp_build(&b, id, &this->format.info.dsp);
 		break;
 
 	case SPA_PARAM_Buffers:
@@ -495,23 +493,18 @@ static int port_set_format(void *object,
 			return res;
 
 		if (info.media_type != SPA_MEDIA_TYPE_audio ||
-		    info.media_subtype != SPA_MEDIA_SUBTYPE_raw)
+		    info.media_subtype != SPA_MEDIA_SUBTYPE_dsp)
 			return -EINVAL;
 
-		if (spa_format_audio_raw_parse(format, &info.info.raw) < 0)
+		if (spa_format_audio_dsp_parse(format, &info.info.dsp) < 0)
 			return -EINVAL;
 
-		if (info.info.raw.format != SPA_AUDIO_FORMAT_F32P)
-			return -EINVAL;
-		if (info.info.raw.channels != 1)
+		if (info.info.dsp.format != SPA_AUDIO_FORMAT_DSP_F32)
 			return -EINVAL;
 
-		if (this->have_format) {
-			if (info.info.raw.rate != this->format.info.raw.rate)
-				return -EINVAL;
-		} else {
-			this->ops.fmt = info.info.raw.format;
-			this->ops.n_channels = info.info.raw.channels;
+		if (!this->have_format) {
+			this->ops.fmt = info.info.dsp.format;
+			this->ops.n_channels = 1;
 			this->ops.cpu_flags = this->cpu_flags;
 
 			if ((res = mix_ops_init(&this->ops)) < 0)
@@ -673,11 +666,11 @@ static int impl_node_process(void *object)
 	spa_log_trace_fp(this->log, NAME " %p: status %p %d %d",
 			this, outio, outio->status, outio->buffer_id);
 
-	if (outio->status == SPA_STATUS_HAVE_DATA)
+	if (SPA_UNLIKELY(outio->status == SPA_STATUS_HAVE_DATA))
 		return outio->status;
 
 	/* recycle */
-	if (outio->buffer_id < outport->n_buffers) {
+	if (SPA_LIKELY(outio->buffer_id < outport->n_buffers)) {
 		queue_buffer(this, outport, &outport->buffers[outio->buffer_id]);
 		outio->buffer_id = SPA_ID_INVALID;
 	}
@@ -693,10 +686,10 @@ static int impl_node_process(void *object)
 		struct spa_io_buffers *inio = NULL;
 		struct buffer *inb;
 
-		if (!inport->valid ||
+		if (SPA_UNLIKELY(!inport->valid ||
 		    (inio = inport->io) == NULL ||
 		    inio->buffer_id >= inport->n_buffers ||
-		    inio->status != SPA_STATUS_HAVE_DATA) {
+		    inio->status != SPA_STATUS_HAVE_DATA)) {
 			spa_log_trace_fp(this->log, NAME " %p: skip input idx:%d valid:%d "
 					"io:%p status:%d buf_id:%d n_buffers:%d", this,
 				i, inport->valid, inio,
@@ -718,7 +711,7 @@ static int impl_node_process(void *object)
 	}
 
 	outb = dequeue_buffer(this, outport);
-        if (outb == NULL) {
+        if (SPA_UNLIKELY(outb == NULL)) {
                 spa_log_trace(this->log, NAME " %p: out of buffers", this);
                 return -EPIPE;
         }
@@ -764,7 +757,7 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
 
@@ -773,7 +766,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct impl *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Node)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -802,7 +795,6 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	struct port *port;
-	uint32_t i;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -812,16 +804,9 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct impl *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_CPU:
-			this->cpu = support[i].data;
-			break;
-		}
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->cpu = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_CPU);
+
 	if (this->cpu)
 		this->cpu_flags = spa_cpu_get_flags(this->cpu);
 

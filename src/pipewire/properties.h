@@ -29,6 +29,8 @@
 extern "C" {
 #endif
 
+#include <stdarg.h>
+	
 #include <spa/utils/dict.h>
 
 /** \class pw_properties
@@ -63,6 +65,11 @@ int pw_properties_update_keys(struct pw_properties *props,
 int pw_properties_update(struct pw_properties *oldprops,
 		     const struct spa_dict *dict);
 
+int pw_properties_add(struct pw_properties *oldprops,
+		     const struct spa_dict *dict);
+int pw_properties_add_keys(struct pw_properties *oldprops,
+		     const struct spa_dict *dict, const char *keys[]);
+
 void pw_properties_clear(struct pw_properties *properties);
 
 void
@@ -76,7 +83,7 @@ pw_properties_setf(struct pw_properties *properties,
 		   const char *key, const char *format, ...) SPA_PRINTF_FUNC(3, 4);
 int
 pw_properties_setva(struct pw_properties *properties,
-		   const char *key, const char *format, va_list args);
+		   const char *key, const char *format, va_list args) SPA_PRINTF_FUNC(3,0);
 const char *
 pw_properties_get(const struct pw_properties *properties, const char *key);
 

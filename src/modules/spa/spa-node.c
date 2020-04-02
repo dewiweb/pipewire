@@ -32,19 +32,15 @@
 
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
+#include <spa/utils/result.h>
 #include <spa/param/props.h>
 #include <spa/pod/iter.h>
 #include <spa/debug/types.h>
 
 #include "spa-node.h"
-#include "pipewire/node.h"
-#include "pipewire/port.h"
-#include "pipewire/log.h"
-#include "pipewire/private.h"
-#include "pipewire/pipewire.h"
 
 struct impl {
-	struct pw_node *this;
+	struct pw_impl_node *this;
 
 	enum pw_spa_node_flags flags;
 
@@ -63,7 +59,7 @@ struct impl {
 static void spa_node_free(void *data)
 {
 	struct impl *impl = data;
-	struct pw_node *node = impl->this;
+	struct pw_impl_node *node = impl->this;
 
 	pw_log_debug("spa-node %p: free", node);
 
@@ -75,23 +71,23 @@ static void spa_node_free(void *data)
 
 static void complete_init(struct impl *impl)
 {
-        struct pw_node *this = impl->this;
+        struct pw_impl_node *this = impl->this;
 
 	impl->init_pending = SPA_ID_INVALID;
 
 	if (SPA_FLAG_IS_SET(impl->flags, PW_SPA_NODE_FLAG_ACTIVATE))
-		pw_node_set_active(this, true);
+		pw_impl_node_set_active(this, true);
 
 	if (!SPA_FLAG_IS_SET(impl->flags, PW_SPA_NODE_FLAG_NO_REGISTER))
-		pw_node_register(this, NULL);
+		pw_impl_node_register(this, NULL);
 	else
-		pw_node_initialized(this);
+		pw_impl_node_initialized(this);
 }
 
 static void spa_node_result(void *data, int seq, int res, uint32_t type, const void *result)
 {
 	struct impl *impl = data;
-	struct pw_node *node = impl->this;
+	struct pw_impl_node *node = impl->this;
 
 	if (seq == impl->init_pending) {
 		pw_log_debug("spa-node %p: init complete event %d %d", node, seq, res);
@@ -99,31 +95,31 @@ static void spa_node_result(void *data, int seq, int res, uint32_t type, const v
 	}
 }
 
-static const struct pw_node_events node_events = {
-	PW_VERSION_NODE_EVENTS,
+static const struct pw_impl_node_events node_events = {
+	PW_VERSION_IMPL_NODE_EVENTS,
 	.free = spa_node_free,
 	.result = spa_node_result,
 };
 
-struct pw_node *
-pw_spa_node_new(struct pw_core *core,
+struct pw_impl_node *
+pw_spa_node_new(struct pw_context *context,
 		enum pw_spa_node_flags flags,
 		struct spa_node *node,
 		struct spa_handle *handle,
 		struct pw_properties *properties,
 		size_t user_data_size)
 {
-	struct pw_node *this;
+	struct pw_impl_node *this;
 	struct impl *impl;
 	int res;
 
-	this = pw_node_new(core, properties, sizeof(struct impl) + user_data_size);
+	this = pw_context_create_node(context, properties, sizeof(struct impl) + user_data_size);
 	if (this == NULL) {
 		res = -errno;
 		goto error_exit;
 	}
 
-	impl = this->user_data;
+	impl = pw_impl_node_get_user_data(this);
 	impl->this = this;
 	impl->node = node;
 	impl->handle = handle;
@@ -132,8 +128,8 @@ pw_spa_node_new(struct pw_core *core,
 	if (user_data_size > 0)
                 impl->user_data = SPA_MEMBER(impl, sizeof(struct impl), void);
 
-	pw_node_add_listener(this, &impl->node_listener, &node_events, impl);
-	if ((res = pw_node_set_implementation(this, impl->node)) < 0)
+	pw_impl_node_add_listener(this, &impl->node_listener, &node_events, impl);
+	if ((res = pw_impl_node_set_implementation(this, impl->node)) < 0)
 		goto error_exit_clean_node;
 
 	if (flags & PW_SPA_NODE_FLAG_ASYNC) {
@@ -144,7 +140,7 @@ pw_spa_node_new(struct pw_core *core,
 	return this;
 
 error_exit_clean_node:
-	pw_node_destroy(this);
+	pw_impl_node_destroy(this);
 	handle = NULL;
 error_exit:
 	if (handle)
@@ -154,14 +150,14 @@ error_exit:
 
 }
 
-void *pw_spa_node_get_user_data(struct pw_node *node)
+void *pw_spa_node_get_user_data(struct pw_impl_node *node)
 {
-	struct impl *impl = node->user_data;
+	struct impl *impl = pw_impl_node_get_user_data(node);
 	return impl->user_data;
 }
 
 static int
-setup_props(struct pw_core *core, struct spa_node *spa_node, struct pw_properties *pw_props)
+setup_props(struct pw_context *context, struct spa_node *spa_node, struct pw_properties *pw_props)
 {
 	int res;
 	struct spa_pod *props;
@@ -184,14 +180,14 @@ setup_props(struct pw_core *core, struct spa_node *spa_node, struct pw_propertie
 	while ((key = pw_properties_iterate(pw_props, &state))) {
 		uint32_t type = 0;
 
-		type = spa_debug_type_find_type(NULL, key);
+		type = spa_debug_type_find_type(spa_type_props, key);
 		if (type == SPA_TYPE_None)
 			continue;
 
 		if ((prop = spa_pod_find_prop(props, prop, type))) {
 			const char *value = pw_properties_get(pw_props, key);
 
-			pw_log_info("configure prop %s", key);
+			pw_log_info("configure prop %s to %s", key, value);
 
 			switch(prop->value.type) {
 			case SPA_TYPE_Bool:
@@ -200,7 +196,7 @@ setup_props(struct pw_core *core, struct spa_node *spa_node, struct pw_propertie
 				break;
 			case SPA_TYPE_Id:
 				SPA_POD_VALUE(struct spa_pod_id, &prop->value) =
-					spa_debug_type_find_type(NULL, value);
+					pw_properties_parse_int(value);
 				break;
 			case SPA_TYPE_Int:
 				SPA_POD_VALUE(struct spa_pod_int, &prop->value) =
@@ -234,20 +230,20 @@ setup_props(struct pw_core *core, struct spa_node *spa_node, struct pw_propertie
 }
 
 
-struct pw_node *pw_spa_node_load(struct pw_core *core,
+struct pw_impl_node *pw_spa_node_load(struct pw_context *context,
 				 const char *factory_name,
 				 enum pw_spa_node_flags flags,
 				 struct pw_properties *properties,
 				 size_t user_data_size)
 {
-	struct pw_node *this;
+	struct pw_impl_node *this;
 	struct impl *impl;
 	struct spa_node *spa_node;
 	int res;
 	struct spa_handle *handle;
 	void *iface;
 
-	handle = pw_core_load_spa_handle(core,
+	handle = pw_context_load_spa_handle(context,
 			factory_name,
 			properties ? &properties->dict : NULL);
 	if (handle == NULL) {
@@ -265,19 +261,19 @@ struct pw_node *pw_spa_node_load(struct pw_core *core,
 	spa_node = iface;
 
 	if (properties != NULL) {
-		if (setup_props(core, spa_node, properties) < 0) {
+		if (setup_props(context, spa_node, properties) < 0) {
 			pw_log_warn("can't setup properties: %s", spa_strerror(res));
 		}
 	}
 
-	this = pw_spa_node_new(core, flags,
+	this = pw_spa_node_new(context, flags,
 			       spa_node, handle, properties, user_data_size);
 	if (this == NULL) {
 		res = -errno;
 		goto error_exit;
 	}
 
-	impl = this->user_data;
+	impl = pw_impl_node_get_user_data(this);
 	impl->factory_name = strdup(factory_name);
 
 	return this;

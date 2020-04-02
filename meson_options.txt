@@ -2,8 +2,16 @@ option('docs',
        description: 'Build documentation',
        type: 'boolean',
        value: false)
+option('examples',
+       description: 'Build examples',
+       type: 'boolean',
+       value: true)
 option('man',
        description: 'Build manpages',
+       type: 'boolean',
+       value: true)
+option('tests',
+       description: 'Build tests',
        type: 'boolean',
        value: true)
 option('gstreamer',
@@ -92,5 +100,9 @@ option('volume',
        value: false)
 option('vulkan',
        description: 'Enable vulkan spa plugin integration',
+       type: 'boolean',
+       value: true)
+option('pw-cat',
+       description: 'Build pw-cat/pw-play/pw-record',
        type: 'boolean',
        value: true)

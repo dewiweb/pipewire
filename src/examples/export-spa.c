@@ -26,20 +26,21 @@
 #include <sys/mman.h>
 #include <signal.h>
 
+#include <spa/utils/result.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/param/props.h>
 
-#include <pipewire/pipewire.h>
+#include <pipewire/impl.h>
 
 struct data {
 	struct pw_main_loop *loop;
 
+	struct pw_context *context;
+
 	struct pw_core *core;
+	struct spa_hook core_listener;
 
-	struct pw_remote *remote;
-	struct spa_hook remote_listener;
-
-	struct pw_node *node;
+	struct spa_node *node;
 	const char *library;
 	const char *factory;
 	const char *path;
@@ -59,75 +60,66 @@ static void node_event_info(void *object, const struct pw_node_info *info)
 	}
 }
 
-static const struct pw_node_proxy_events node_events = {
-	PW_VERSION_NODE_PROXY_EVENTS,
+static const struct pw_node_events node_events = {
+	PW_VERSION_NODE_EVENTS,
 	.info = node_event_info,
 };
 
 static int make_node(struct data *data)
 {
-	struct pw_factory *factory;
 	struct pw_properties *props;
-
-        factory = pw_core_find_factory(data->core, "spa-node-factory");
-	if (factory == NULL)
-		return -1;
+	struct spa_handle *hndl;
+	void *iface;
+	int res;
 
         props = pw_properties_new(SPA_KEY_LIBRARY_NAME, data->library,
-                                  SPA_KEY_FACTORY_NAME, data->factory, NULL);
+                                  SPA_KEY_FACTORY_NAME, data->factory,
+				  NULL);
+
+
+	hndl = pw_context_load_spa_handle(data->context, data->factory, &props->dict);
+	if (hndl == NULL)
+		return -errno;
+
+	if ((res = spa_handle_get_interface(hndl, SPA_TYPE_INTERFACE_Node, &iface)) < 0)
+		return res;
+
+	data->node = iface;
 
 	if (data->path) {
-		pw_properties_set(props, PW_KEY_NODE_AUTOCONNECT, "1");
+		pw_properties_set(props, PW_KEY_NODE_AUTOCONNECT, "true");
 		pw_properties_set(props, PW_KEY_NODE_TARGET, data->path);
 	}
 
-        data->node = pw_factory_create_object(factory,
-					      NULL,
-					      PW_TYPE_INTERFACE_Node,
-					      PW_VERSION_NODE_PROXY,
-					      props, SPA_ID_INVALID);
-	if (data->node == NULL)
-		return -errno;
+	data->proxy = pw_core_export(data->core,
+			SPA_TYPE_INTERFACE_Node, &props->dict,
+			data->node, 0);
+	pw_properties_free(props);
 
-	pw_node_set_active(data->node, true);
-
-	data->proxy = pw_remote_export(data->remote, PW_TYPE_INTERFACE_Node, NULL, data->node, 0);
 	if (data->proxy == NULL)
 		return -errno;
 
-	pw_node_proxy_add_listener((struct pw_node_proxy*)data->proxy,
+	pw_node_add_listener((struct pw_node*)data->proxy,
 			&data->node_listener, &node_events, data);
 
 	return 0;
 }
 
-static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remote_state state, const char *error)
+static void on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
 {
-	struct data *data = _data;
+	struct data *d = data;
 
-	switch (state) {
-	case PW_REMOTE_STATE_ERROR:
-		printf("remote error: %s\n", error);
-		pw_main_loop_quit(data->loop);
-		break;
+	pw_log_error("error id:%u seq:%d res:%d (%s): %s",
+			id, seq, res, spa_strerror(res), message);
 
-	case PW_REMOTE_STATE_CONNECTED:
-		printf("remote state: \"%s\"\n", pw_remote_state_as_string(state));
-		if (make_node(data) < 0) {
-			pw_log_error("can't make node");
-			pw_main_loop_quit(data->loop);
-		}
-		break;
-
-	default:
-		printf("remote state: \"%s\"\n", pw_remote_state_as_string(state));
-		break;
+	if (id == 0) {
+		pw_main_loop_quit(d->loop);
 	}
 }
 
-static const struct pw_remote_events remote_events = {
-	PW_VERSION_REMOTE_EVENTS,
-	.state_changed = on_state_changed,
+static const struct pw_core_events core_events = {
+	PW_VERSION_CORE_EVENTS,
+	.error = on_core_error,
 };
 
 static void do_quit(void *data, int signal_number)
@@ -154,22 +146,31 @@ int main(int argc, char *argv[])
 	l = pw_main_loop_get_loop(data.loop);
         pw_loop_add_signal(l, SIGINT, do_quit, &data);
         pw_loop_add_signal(l, SIGTERM, do_quit, &data);
-	data.core = pw_core_new(l, NULL, 0);
-        data.remote = pw_remote_new(data.core, NULL, 0);
+	data.context = pw_context_new(l, NULL, 0);
 	data.library = argv[1];
 	data.factory = argv[2];
 	if (argc > 3)
 		data.path = argv[3];
 
-	pw_module_load(data.core, "libpipewire-module-spa-node-factory", NULL, NULL);
+	pw_context_load_module(data.context, "libpipewire-module-spa-node-factory", NULL, NULL);
 
-	pw_remote_add_listener(data.remote, &data.remote_listener, &remote_events, &data);
+        data.core = pw_context_connect(data.context, NULL, 0);
+	if (data.core == NULL) {
+		printf("can't connect: %m\n");
+		return -1;
+	}
+	pw_core_add_listener(data.core,
+				   &data.core_listener,
+				   &core_events, &data);
 
-        pw_remote_connect(data.remote);
+	if (make_node(&data) < 0) {
+		pw_log_error("can't make node");
+		return -1;
+	}
 
 	pw_main_loop_run(data.loop);
 
-	pw_core_destroy(data.core);
+	pw_context_destroy(data.context);
 	pw_main_loop_destroy(data.loop);
 
 	return 0;

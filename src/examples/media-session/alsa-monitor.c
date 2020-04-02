@@ -32,37 +32,46 @@
 
 #include <alsa/asoundlib.h>
 
+#include <spa/monitor/device.h>
 #include <spa/node/node.h>
+#include <spa/node/keys.h>
+#include <spa/utils/result.h>
 #include <spa/utils/hook.h>
 #include <spa/utils/names.h>
 #include <spa/utils/keys.h>
-#include <spa/param/audio/format-utils.h>
 #include <spa/param/props.h>
+#include <spa/pod/builder.h>
 #include <spa/debug/dict.h>
+#include <spa/debug/pod.h>
+#include <spa/support/dbus.h>
 
-#include "pipewire/pipewire.h"
-#include "pipewire/private.h"
+#include <pipewire/pipewire.h>
+#include <pipewire/main-loop.h>
+#include <extensions/session-manager.h>
+
+#include "media-session.h"
 
 #include "reserve.c"
 
 #define DEFAULT_JACK_SECONDS	1
 
-struct alsa_object;
-
-struct alsa_node {
-	struct monitor *monitor;
-	struct alsa_object *object;
+struct node {
+	struct impl *impl;
+	enum pw_direction direction;
+	struct device *device;
 	struct spa_list link;
 	uint32_t id;
 
 	struct pw_properties *props;
 
-	struct pw_proxy *proxy;
 	struct spa_node *node;
+
+	struct sm_node *snode;
+	unsigned int acquired:1;
 };
 
-struct alsa_object {
-	struct monitor *monitor;
+struct device {
+	struct impl *impl;
 	struct spa_list link;
 	uint32_t id;
 	uint32_t device_id;
@@ -72,29 +81,57 @@ struct alsa_object {
 	int seq;
 	int priority;
 
+	int profile;
+	int pending_profile;
+
 	struct pw_properties *props;
 
 	struct spa_handle *handle;
-	struct pw_proxy *proxy;
 	struct spa_device *device;
 	struct spa_hook device_listener;
 
+	struct sm_device *sdevice;
+	struct spa_hook listener;
+
+	uint32_t n_acquired;
+
 	unsigned int first:1;
+	unsigned int appeared:1;
 	struct spa_list node_list;
 };
 
-static struct alsa_node *alsa_find_node(struct alsa_object *obj, uint32_t id)
-{
-	struct alsa_node *node;
+struct impl {
+	struct sm_media_session *session;
+	struct spa_hook session_listener;
 
-	spa_list_for_each(node, &obj->node_list, link) {
+	DBusConnection *conn;
+
+	struct spa_handle *handle;
+
+	struct spa_device *monitor;
+	struct spa_hook listener;
+
+	struct spa_list device_list;
+
+	struct spa_source *jack_timeout;
+	struct pw_proxy *jack_device;
+};
+
+#undef NAME
+#define NAME "alsa-monitor"
+
+static struct node *alsa_find_node(struct device *device, uint32_t id)
+{
+	struct node *node;
+
+	spa_list_for_each(node, &device->node_list, link) {
 		if (node->id == id)
 			return node;
 	}
 	return NULL;
 }
 
-static void alsa_update_node(struct alsa_object *obj, struct alsa_node *node,
+static void alsa_update_node(struct device *device, struct node *node,
 		const struct spa_device_object_info *info)
 {
 	pw_log_debug("update node %u", node->id);
@@ -105,19 +142,58 @@ static void alsa_update_node(struct alsa_object *obj, struct alsa_node *node,
 	pw_properties_update(node->props, info->props);
 }
 
-static struct alsa_node *alsa_create_node(struct alsa_object *obj, uint32_t id,
+static int node_acquire(void *data)
+{
+	struct node *node = data;
+	struct device *device = node->device;
+
+	pw_log_debug("acquire %u", node->id);
+
+	if (node->acquired)
+		return 0;
+
+	node->acquired = true;
+
+	if (device && device->n_acquired++ == 0)
+		rd_device_acquire(device->reserve);
+	return 0;
+}
+
+static int node_release(void *data)
+{
+	struct node *node = data;
+	struct device *device = node->device;
+
+	pw_log_debug("release %u", node->id);
+
+	if (!node->acquired)
+		return 0;
+
+	node->acquired = false;
+
+	if (device && --device->n_acquired == 0)
+		rd_device_release(device->reserve);
+	return 0;
+}
+
+static const struct sm_object_methods node_methods = {
+	SM_VERSION_OBJECT_METHODS,
+	.acquire = node_acquire,
+	.release = node_release,
+};
+
+static struct node *alsa_create_node(struct device *device, uint32_t id,
 		const struct spa_device_object_info *info)
 {
-	struct alsa_node *node;
-	struct monitor *monitor = obj->monitor;
-	struct impl *impl = monitor->impl;
+	struct node *node;
+	struct impl *impl = device->impl;
 	int res;
 	const char *dev, *subdev, *stream;
 	int priority;
 
 	pw_log_debug("new node %u", id);
 
-	if (info->type != SPA_TYPE_INTERFACE_Node) {
+	if (strcmp(info->type, SPA_TYPE_INTERFACE_Node) != 0) {
 		errno = EINVAL;
 		return NULL;
 	}
@@ -129,10 +205,9 @@ static struct alsa_node *alsa_create_node(struct alsa_object *obj, uint32_t id,
 
 	node->props = pw_properties_new_dict(info->props);
 
-	if (obj->device_id != 0)
-		pw_properties_setf(node->props, PW_KEY_DEVICE_ID, "%d", obj->device_id);
+	pw_properties_setf(node->props, PW_KEY_DEVICE_ID, "%d", device->device_id);
 
-	pw_properties_set(node->props, "factory.name", info->factory_name);
+	pw_properties_set(node->props, PW_KEY_FACTORY_NAME, info->factory_name);
 
 	if ((dev = pw_properties_get(node->props, SPA_KEY_API_ALSA_PCM_DEVICE)) == NULL)
 		dev = "0";
@@ -141,13 +216,18 @@ static struct alsa_node *alsa_create_node(struct alsa_object *obj, uint32_t id,
 	if ((stream = pw_properties_get(node->props, SPA_KEY_API_ALSA_PCM_STREAM)) == NULL)
 		stream = "unknown";
 
-	if (obj->first) {
+	if (!strcmp(stream, "capture"))
+		node->direction = PW_DIRECTION_OUTPUT;
+	else
+		node->direction = PW_DIRECTION_INPUT;
+
+	if (device->first) {
 		if (atol(dev) != 0)
-			obj->priority -= 256;
-		obj->first = false;
+			device->priority -= 256;
+		device->first = false;
 	}
 
-	priority = obj->priority;
+	priority = device->priority;
 	if (!strcmp(stream, "capture"))
 		priority += 1000;
 	priority -= atol(dev) * 16;
@@ -159,14 +239,14 @@ static struct alsa_node *alsa_create_node(struct alsa_object *obj, uint32_t id,
 	}
 
 	if (pw_properties_get(node->props, SPA_KEY_MEDIA_CLASS) == NULL) {
-		if (!strcmp(stream, "capture"))
+		if (node->direction == PW_DIRECTION_OUTPUT)
 			pw_properties_setf(node->props, SPA_KEY_MEDIA_CLASS, "Audio/Source");
 		else
 			pw_properties_setf(node->props, SPA_KEY_MEDIA_CLASS, "Audio/Sink");
 	}
 	if (pw_properties_get(node->props, SPA_KEY_NODE_NAME) == NULL) {
 		const char *devname;
-		if ((devname = pw_properties_get(obj->props, SPA_KEY_DEVICE_NAME)) == NULL)
+		if ((devname = pw_properties_get(device->props, SPA_KEY_DEVICE_NAME)) == NULL)
 			devname = "unknown";
 		pw_properties_setf(node->props, SPA_KEY_NODE_NAME, "%s.%s.%s.%s",
 				devname, stream, dev, subdev);
@@ -174,7 +254,7 @@ static struct alsa_node *alsa_create_node(struct alsa_object *obj, uint32_t id,
 	if (pw_properties_get(node->props, PW_KEY_NODE_DESCRIPTION) == NULL) {
 		const char *desc, *name = NULL;
 
-		if ((desc = pw_properties_get(obj->props, SPA_KEY_DEVICE_DESCRIPTION)) == NULL)
+		if ((desc = pw_properties_get(device->props, SPA_KEY_DEVICE_DESCRIPTION)) == NULL)
 			desc = "unknown";
 
 		name = pw_properties_get(node->props, SPA_KEY_API_ALSA_PCM_NAME);
@@ -195,21 +275,20 @@ static struct alsa_node *alsa_create_node(struct alsa_object *obj, uint32_t id,
 		}
 	}
 
-	node->monitor = monitor;
-	node->object = obj;
+	node->impl = impl;
+	node->device = device;
 	node->id = id;
-	node->proxy = pw_core_proxy_create_object(impl->core_proxy,
+	node->snode = sm_media_session_create_node(impl->session,
 				"adapter",
-				PW_TYPE_INTERFACE_Node,
-				PW_VERSION_NODE_PROXY,
-				&node->props->dict,
-                                0);
-	if (node->proxy == NULL) {
+				&node->props->dict);
+	if (node->snode == NULL) {
 		res = -errno;
 		goto clean_node;
 	}
 
-	spa_list_append(&obj->node_list, &node->link);
+	node->snode->obj.methods = SPA_CALLBACKS_INIT(&node_methods, node);
+
+	spa_list_append(&device->node_list, &node->link);
 
 	return node;
 
@@ -221,46 +300,43 @@ exit:
 	return NULL;
 }
 
-static void alsa_remove_node(struct alsa_object *obj, struct alsa_node *node)
+static void alsa_remove_node(struct device *device, struct node *node)
 {
 	pw_log_debug("remove node %u", node->id);
 	spa_list_remove(&node->link);
-	pw_proxy_destroy(node->proxy);
+	sm_object_destroy(&node->snode->obj);
+	pw_properties_free(node->props);
 	free(node);
 }
 
 static void alsa_device_info(void *data, const struct spa_device_info *info)
 {
-	struct alsa_object *obj = data;
-	const char *str;
+	struct device *device = data;
 
 	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
 		spa_debug_dict(0, info->props);
 
-	pw_properties_update(obj->props, info->props);
-
-	if ((str = pw_properties_get(obj->props, PW_KEY_DEVICE_ID)) != NULL)
-		obj->device_id = pw_properties_parse_int(str);
+	pw_properties_update(device->props, info->props);
 }
 
 static void alsa_device_object_info(void *data, uint32_t id,
                 const struct spa_device_object_info *info)
 {
-	struct alsa_object *obj = data;
-	struct alsa_node *node;
+	struct device *device = data;
+	struct node *node;
 
-	node = alsa_find_node(obj, id);
+	node = alsa_find_node(device, id);
 
 	if (info == NULL) {
 		if (node == NULL) {
-			pw_log_warn("object %p: unknown node %u", obj, id);
+			pw_log_warn("device %p: unknown node %u", device, id);
 			return;
 		}
-		alsa_remove_node(obj, node);
+		alsa_remove_node(device, node);
 	} else if (node == NULL) {
-		alsa_create_node(obj, id, info);
+		alsa_create_node(device, id, info);
 	} else {
-		alsa_update_node(obj, node, info);
+		alsa_update_node(device, node, info);
 	}
 }
 
@@ -270,38 +346,38 @@ static const struct spa_device_events alsa_device_events = {
 	.object_info = alsa_device_object_info
 };
 
-static struct alsa_object *alsa_find_object(struct monitor *monitor, uint32_t id)
+static struct device *alsa_find_device(struct impl *impl, uint32_t id)
 {
-	struct alsa_object *obj;
+	struct device *device;
 
-	spa_list_for_each(obj, &monitor->object_list, link) {
-		if (obj->id == id)
-			return obj;
+	spa_list_for_each(device, &impl->device_list, link) {
+		if (device->id == id)
+			return device;
 	}
 	return NULL;
 }
 
-static void alsa_update_object(struct monitor *monitor, struct alsa_object *obj,
+static void alsa_update_device(struct impl *impl, struct device *device,
 		const struct spa_device_object_info *info)
 {
-	pw_log_debug("update object %u", obj->id);
+	pw_log_debug("update device %u", device->id);
 
 	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
 		spa_debug_dict(0, info->props);
 
-	pw_properties_update(obj->props, info->props);
+	pw_properties_update(device->props, info->props);
 }
 
-static int update_device_props(struct alsa_object *obj)
+static int update_device_props(struct device *device)
 {
-	struct pw_properties *p = obj->props;
+	struct pw_properties *p = device->props;
 	const char *s, *d;
 	char temp[32];
 
 	if ((s = pw_properties_get(p, SPA_KEY_DEVICE_NAME)) == NULL) {
 		if ((s = pw_properties_get(p, SPA_KEY_DEVICE_BUS_ID)) == NULL) {
 			if ((s = pw_properties_get(p, SPA_KEY_DEVICE_BUS_PATH)) == NULL) {
-				snprintf(temp, sizeof(temp), "%d", obj->id);
+				snprintf(temp, sizeof(temp), "%d", device->id);
 				s = temp;
 			}
 		}
@@ -368,6 +444,23 @@ static int update_device_props(struct alsa_object *obj)
 	return 1;
 }
 
+static void set_profile(struct device *device, int index)
+{
+	char buf[1024];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+
+	pw_log_debug("%p: set profile %d id:%d", device, index, device->device_id);
+
+	if (device->device_id != 0) {
+		device->profile = index;
+		spa_device_set_param(device->device,
+				SPA_PARAM_Profile, 0,
+				spa_pod_builder_add_object(&b,
+					SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
+					SPA_PARAM_PROFILE_index,   SPA_POD_Int(index)));
+	}
+}
+
 static void set_jack_profile(struct impl *impl, int index)
 {
 	char buf[1024];
@@ -376,27 +469,16 @@ static void set_jack_profile(struct impl *impl, int index)
 	if (impl->jack_device == NULL)
 		return;
 
-	pw_device_proxy_set_param((struct pw_device_proxy*)impl->jack_device,
+	pw_device_set_param((struct pw_device*)impl->jack_device,
 			SPA_PARAM_Profile, 0,
 			spa_pod_builder_add_object(&b,
-				SPA_TYPE_OBJECT_ParamProfile, 0,
-				SPA_PARAM_PROFILE_index,   SPA_POD_Int(index)));
-}
-
-static void set_profile(struct alsa_object *obj, int index)
-{
-	char buf[1024];
-	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
-	spa_device_set_param(obj->device,
-			SPA_PARAM_Profile, 0,
-			spa_pod_builder_add_object(&b,
-				SPA_TYPE_OBJECT_ParamProfile, 0,
+				SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
 				SPA_PARAM_PROFILE_index,   SPA_POD_Int(index)));
 }
 
 static void remove_jack_timeout(struct impl *impl)
 {
-	struct pw_loop *main_loop = pw_core_get_main_loop(impl->core);
+	struct pw_loop *main_loop = impl->session->loop;
 
 	if (impl->jack_timeout) {
 		pw_loop_destroy_source(main_loop, impl->jack_timeout);
@@ -414,7 +496,7 @@ static void jack_timeout(void *data, uint64_t expirations)
 static void add_jack_timeout(struct impl *impl)
 {
 	struct timespec value;
-	struct pw_loop *main_loop = pw_core_get_main_loop(impl->core);
+	struct pw_loop *main_loop = impl->session->loop;
 
 	if (impl->jack_timeout == NULL)
 		impl->jack_timeout = pw_loop_add_timer(main_loop, jack_timeout, impl);
@@ -426,83 +508,150 @@ static void add_jack_timeout(struct impl *impl)
 
 static void reserve_acquired(void *data, struct rd_device *d)
 {
-	struct alsa_object *obj = data;
-	struct monitor *monitor = obj->monitor;
-	struct impl *impl = monitor->impl;
+	struct device *device = data;
 
-	pw_log_debug("%p: reserve acquired", obj);
+	pw_log_debug("%p: reserve acquired %d", device, device->n_acquired);
 
-	remove_jack_timeout(impl);
-	set_jack_profile(impl, 0);
-	set_profile(obj, 1);
+	device->sdevice->locked = false;
 
-	setup_alsa_endpoint(obj);
+	if (device->n_acquired == 0)
+		rd_device_release(device->reserve);
 }
 
 static void sync_complete_done(void *data, int seq)
 {
-	struct alsa_object *obj = data;
-	struct monitor *monitor = obj->monitor;
-	struct impl *impl = monitor->impl;
+	struct device *device = data;
 
-	if (seq != obj->seq)
+	pw_log_debug("%d %d", device->seq, seq);
+	if (seq != device->seq)
 		return;
 
-	spa_hook_remove(&obj->sync_listener);
-	obj->seq = 0;
+	spa_hook_remove(&device->sync_listener);
+	device->seq = 0;
 
-	rd_device_complete_release(obj->reserve, true);
+	if (device->reserve)
+		rd_device_complete_release(device->reserve, true);
+}
 
-	add_jack_timeout(impl);
+static void sync_destroy(void *data)
+{
+	struct device *device = data;
+	if (device->seq != 0)
+		sync_complete_done(data, device->seq);
 }
 
 static const struct pw_proxy_events sync_complete_release = {
 	PW_VERSION_PROXY_EVENTS,
+	.destroy = sync_destroy,
 	.done = sync_complete_done
 };
 
 static void reserve_release(void *data, struct rd_device *d, int forced)
 {
-	struct alsa_object *obj = data;
-	struct monitor *monitor = obj->monitor;
-	struct impl *impl = monitor->impl;
+	struct device *device = data;
 
-	pw_log_debug("%p: reserve release", obj);
+	pw_log_debug("%p: reserve release", device);
+
+	set_profile(device, 0);
+
+	if (device->seq == 0)
+		pw_proxy_add_listener(device->sdevice->obj.proxy,
+				&device->sync_listener,
+				&sync_complete_release, device);
+	device->seq = pw_proxy_sync(device->sdevice->obj.proxy, 0);
+}
+
+static void reserve_busy(void *data, struct rd_device *d, const char *name, int32_t prio)
+{
+	struct device *device = data;
+	struct impl *impl = device->impl;
+
+	pw_log_debug("%p: reserve busy %s", device, name);
+	device->sdevice->locked = true;
+
+	if (strcmp(name, "jack") == 0) {
+		add_jack_timeout(impl);
+	} else {
+		remove_jack_timeout(impl);
+	}
+}
+
+static void reserve_available(void *data, struct rd_device *d, const char *name)
+{
+	struct device *device = data;
+	struct impl *impl = device->impl;
+
+	pw_log_debug("%p: reserve available %s", device, name);
+	device->sdevice->locked = false;
 
 	remove_jack_timeout(impl);
-	set_profile(obj, 0);
+	if (strcmp(name, "jack") == 0) {
+		set_jack_profile(impl, 0);
+	}
 
-	if (obj->seq == 0)
-		pw_proxy_add_listener(obj->proxy,
-				&obj->sync_listener,
-				&sync_complete_release, obj);
-	obj->seq = pw_proxy_sync(obj->proxy, 0);
 }
 
 static const struct rd_device_callbacks reserve_callbacks = {
 	.acquired = reserve_acquired,
 	.release = reserve_release,
+	.busy = reserve_busy,
+	.available = reserve_available,
 };
 
-static struct alsa_object *alsa_create_object(struct monitor *monitor, uint32_t id,
+static void device_destroy(void *data)
+{
+	struct device *device = data;
+	struct node *node;
+
+	pw_log_debug("device %p destroy", device);
+
+	spa_list_consume(node, &device->node_list, link)
+		alsa_remove_node(device, node);
+}
+
+static void device_update(void *data)
+{
+	struct device *device = data;
+
+	pw_log_debug("device %p appeared %d %d", device, device->appeared, device->profile);
+
+	if (!device->appeared) {
+		device->device_id = device->sdevice->obj.id;
+		device->appeared = true;
+
+		spa_device_add_listener(device->device,
+			&device->device_listener,
+			&alsa_device_events, device);
+		sm_object_sync_update(&device->sdevice->obj);
+	}
+	if (device->pending_profile != device->profile && !device->sdevice->locked)
+		set_profile(device, device->pending_profile);
+}
+
+static const struct sm_object_events device_events = {
+	SM_VERSION_OBJECT_EVENTS,
+        .destroy = device_destroy,
+        .update = device_update,
+};
+
+static struct device *alsa_create_device(struct impl *impl, uint32_t id,
 		const struct spa_device_object_info *info)
 {
-	struct impl *impl = monitor->impl;
-	struct pw_core *core = impl->core;
-	struct alsa_object *obj;
+	struct pw_context *context = impl->session->context;
+	struct device *device;
 	struct spa_handle *handle;
 	int res;
 	void *iface;
 	const char *card;
 
-	pw_log_debug("new object %u", id);
+	pw_log_debug("new device %u", id);
 
-	if (info->type != SPA_TYPE_INTERFACE_Device) {
+	if (strcmp(info->type, SPA_TYPE_INTERFACE_Device) != 0) {
 		errno = EINVAL;
 		return NULL;
 	}
 
-	handle = pw_core_load_spa_handle(core,
+	handle = pw_context_load_spa_handle(context,
 			info->factory_name,
 			info->props);
 	if (handle == NULL) {
@@ -512,66 +661,65 @@ static struct alsa_object *alsa_create_object(struct monitor *monitor, uint32_t 
 	}
 
 	if ((res = spa_handle_get_interface(handle, info->type, &iface)) < 0) {
-		pw_log_error("can't get %d interface: %d", info->type, res);
+		pw_log_error("can't get %s interface: %s", info->type, spa_strerror(res));
 		goto unload_handle;
 	}
 
-	obj = calloc(1, sizeof(*obj));
-	if (obj == NULL) {
+	device = calloc(1, sizeof(*device));
+	if (device == NULL) {
 		res = -errno;
 		goto unload_handle;
 	}
 
-	obj->monitor = monitor;
-	obj->id = id;
-	obj->handle = handle;
-	obj->device = iface;
-	obj->props = pw_properties_new_dict(info->props);
-	obj->priority = 1000;
-	update_device_props(obj);
+	device->impl = impl;
+	device->id = id;
+	device->handle = handle;
+	device->device = iface;
+	device->props = pw_properties_new_dict(info->props);
+	device->priority = 1000;
+	update_device_props(device);
 
-	obj->proxy = pw_remote_export(impl->remote,
-			info->type, pw_properties_copy(obj->props), obj->device, 0);
-	if (obj->proxy == NULL) {
+	device->sdevice = sm_media_session_export_device(impl->session,
+			&device->props->dict, device->device);
+	if (device->sdevice == NULL) {
 		res = -errno;
-		goto clean_object;
+		goto clean_device;
 	}
 
-	if ((card = spa_dict_lookup(info->props, SPA_KEY_API_ALSA_CARD)) != NULL) {
+	sm_object_add_listener(&device->sdevice->obj,
+			&device->listener,
+			&device_events, device);
+
+	if (impl->conn &&
+	    (card = spa_dict_lookup(info->props, SPA_KEY_API_ALSA_CARD)) != NULL) {
 		const char *reserve;
 
-		pw_properties_setf(obj->props, "api.dbus.ReserveDevice1", "Audio%s", card);
-		reserve = pw_properties_get(obj->props, "api.dbus.ReserveDevice1");
+		pw_properties_setf(device->props, "api.dbus.ReserveDevice1", "Audio%s", card);
+		reserve = pw_properties_get(device->props, "api.dbus.ReserveDevice1");
 
-		obj->reserve = rd_device_new(impl->conn, reserve,
+		device->reserve = rd_device_new(impl->conn, reserve,
 				"PipeWire", 10,
-				&reserve_callbacks, obj);
+				&reserve_callbacks, device);
 
-		if (obj->reserve == NULL) {
+		if (device->reserve == NULL) {
 			pw_log_warn("can't create device reserve for %s: %m", reserve);
 		} else {
-			rd_device_set_application_device_name(obj->reserve,
+			rd_device_set_application_device_name(device->reserve,
 				spa_dict_lookup(info->props, SPA_KEY_API_ALSA_PATH));
+
+			rd_device_acquire(device->reserve);
 		}
-		obj->priority -= atol(card) * 64;
+		device->priority -= atol(card) * 64;
 	}
+	device->pending_profile = 1;
+	device->first = true;
+	spa_list_init(&device->node_list);
+	spa_list_append(&impl->device_list, &device->link);
 
-	/* no device reservation, activate device right now */
-	if (obj->reserve == NULL)
-		set_profile(obj, 1);
+	return device;
 
-	obj->first = true;
-	spa_list_init(&obj->node_list);
-
-	spa_device_add_listener(obj->device,
-			&obj->device_listener, &alsa_device_events, obj);
-
-	spa_list_append(&monitor->object_list, &obj->link);
-
-	return obj;
-
-clean_object:
-	free(obj);
+clean_device:
+	free(device);
 unload_handle:
 	pw_unload_spa_handle(handle);
 exit:
@@ -579,37 +727,42 @@ exit:
 	return NULL;
 }
 
-static void alsa_remove_object(struct monitor *monitor, struct alsa_object *obj)
+static void alsa_remove_device(struct impl *impl, struct device *device)
 {
-	pw_log_debug("remove object %u", obj->id);
-	spa_list_remove(&obj->link);
-	spa_hook_remove(&obj->device_listener);
-	if (obj->seq != 0)
-		spa_hook_remove(&obj->sync_listener);
-	if (obj->reserve)
-		rd_device_destroy(obj->reserve);
-	pw_proxy_destroy(obj->proxy);
-	pw_unload_spa_handle(obj->handle);
-	free(obj);
+	pw_log_debug("remove device %u", device->id);
+	spa_list_remove(&device->link);
+	if (device->appeared)
+		spa_hook_remove(&device->device_listener);
+	if (device->seq != 0)
+		spa_hook_remove(&device->sync_listener);
+	if (device->reserve)
+		rd_device_destroy(device->reserve);
+	if (device->sdevice) {
+		spa_hook_remove(&device->listener);
+		sm_object_destroy(&device->sdevice->obj);
+	}
+	pw_unload_spa_handle(device->handle);
+	pw_properties_free(device->props);
+	free(device);
 }
 
 static void alsa_udev_object_info(void *data, uint32_t id,
                 const struct spa_device_object_info *info)
 {
-	struct monitor *monitor = data;
-	struct alsa_object *obj;
+	struct impl *impl = data;
+	struct device *device;
 
-	obj = alsa_find_object(monitor, id);
+	device = alsa_find_device(impl, id);
 
 	if (info == NULL) {
-		if (obj == NULL)
+		if (device == NULL)
 			return;
-		alsa_remove_object(monitor, obj);
-	} else if (obj == NULL) {
-		if ((obj = alsa_create_object(monitor, id, info)) == NULL)
+		alsa_remove_device(impl, device);
+	} else if (device == NULL) {
+		if ((device = alsa_create_device(impl, id, info)) == NULL)
 			return;
 	} else {
-		alsa_update_object(monitor, obj, info);
+		alsa_update_device(impl, device, info);
 	}
 }
 
@@ -618,62 +771,6 @@ static const struct spa_device_events alsa_udev_events =
 	SPA_VERSION_DEVICE_EVENTS,
 	.object_info = alsa_udev_object_info,
 };
-
-static int alsa_start_midi_bridge(struct impl *impl)
-{
-	struct pw_properties *props;
-	int res = 0;
-
-	props = pw_properties_new(
-			SPA_KEY_FACTORY_NAME, SPA_NAME_API_ALSA_SEQ_BRIDGE,
-			SPA_KEY_NODE_NAME, "Midi-Bridge",
-			NULL);
-
-	impl->midi_bridge = pw_core_proxy_create_object(impl->core_proxy,
-				"spa-node-factory",
-				PW_TYPE_INTERFACE_Node,
-				PW_VERSION_NODE_PROXY,
-				&props->dict,
-                                0);
-
-	if (impl->midi_bridge == NULL)
-		res = -errno;
-
-	return res;
-}
-
-static int alsa_start_monitor(struct impl *impl, struct monitor *monitor)
-{
-	struct spa_handle *handle;
-	struct pw_core *core = impl->core;
-	int res;
-	void *iface;
-
-	handle = pw_core_load_spa_handle(core, SPA_NAME_API_ALSA_ENUM_UDEV, NULL);
-	if (handle == NULL) {
-		res = -errno;
-		goto out;
-	}
-
-	if ((res = spa_handle_get_interface(handle, SPA_TYPE_INTERFACE_Device, &iface)) < 0) {
-		pw_log_error("can't get udev Device interface: %d", res);
-		goto out_unload;
-	}
-
-	monitor->impl = impl;
-	monitor->handle = handle;
-	monitor->monitor = iface;
-	spa_list_init(&monitor->object_list);
-
-	spa_device_add_listener(monitor->monitor, &monitor->listener, &alsa_udev_events, monitor);
-
-	return 0;
-
-      out_unload:
-	pw_unload_spa_handle(handle);
-      out:
-	return res;
-}
 
 static int alsa_start_jack_device(struct impl *impl)
 {
@@ -685,15 +782,81 @@ static int alsa_start_jack_device(struct impl *impl)
 			SPA_KEY_NODE_NAME, "JACK-Device",
 			NULL);
 
-	impl->jack_device = pw_core_proxy_create_object(impl->core_proxy,
+	impl->jack_device = sm_media_session_create_object(impl->session,
 				"spa-device-factory",
 				PW_TYPE_INTERFACE_Device,
-				PW_VERSION_DEVICE_PROXY,
+				PW_VERSION_DEVICE,
 				&props->dict,
                                 0);
 
 	if (impl->jack_device == NULL)
 		res = -errno;
 
+	pw_properties_free(props);
+
+	return res;
+}
+
+static void session_destroy(void *data)
+{
+	struct impl *impl = data;
+	spa_hook_remove(&impl->session_listener);
+	spa_hook_remove(&impl->listener);
+	pw_proxy_destroy(impl->jack_device);
+	pw_unload_spa_handle(impl->handle);
+	free(impl);
+}
+
+static const struct sm_media_session_events session_events = {
+	SM_VERSION_MEDIA_SESSION_EVENTS,
+	.destroy = session_destroy,
+};
+
+int sm_alsa_monitor_start(struct sm_media_session *session)
+{
+	struct pw_context *context = session->context;
+	struct impl *impl;
+	void *iface;
+	int res;
+
+	impl = calloc(1, sizeof(struct impl));
+	if (impl == NULL)
+		return -errno;
+
+	impl->session = session;
+
+	if (session->dbus_connection)
+		impl->conn = spa_dbus_connection_get(session->dbus_connection);
+	if (impl->conn == NULL)
+		pw_log_warn("no dbus connection, device reservation disabled");
+	else
+		pw_log_debug("got dbus connection %p", impl->conn);
+
+
+	impl->handle = pw_context_load_spa_handle(context, SPA_NAME_API_ALSA_ENUM_UDEV, NULL);
+	if (impl->handle == NULL) {
+		res = -errno;
+		goto out_free;
+	}
+
+	if ((res = spa_handle_get_interface(impl->handle, SPA_TYPE_INTERFACE_Device, &iface)) < 0) {
+		pw_log_error("can't get udev Device interface: %d", res);
+		goto out_unload;
+	}
+	impl->monitor = iface;
+	spa_list_init(&impl->device_list);
+	spa_device_add_listener(impl->monitor, &impl->listener, &alsa_udev_events, impl);
+
+	if ((res = alsa_start_jack_device(impl)) < 0)
+		goto out_unload;
+
+	sm_media_session_add_listener(session, &impl->session_listener, &session_events, impl);
+
+	return 0;
+
+out_unload:
+	pw_unload_spa_handle(impl->handle);
+out_free:
+	free(impl);
 	return res;
 }

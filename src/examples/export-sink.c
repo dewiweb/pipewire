@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <sys/mman.h>
 
+#include <spa/utils/result.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/param/props.h>
 #include <spa/node/utils.h>
@@ -68,10 +69,10 @@ struct data {
 
 	struct pw_main_loop *loop;
 
-	struct pw_core *core;
+	struct pw_context *context;
 
-	struct pw_remote *remote;
-	struct spa_hook remote_listener;
+	struct pw_core *core;
+	struct spa_hook core_listener;
 
 	struct spa_node impl_node;
 	struct spa_hook_list hooks;
@@ -462,9 +463,10 @@ static void make_node(struct data *data)
 {
 	struct pw_properties *props;
 
-	props = pw_properties_new(PW_KEY_NODE_AUTOCONNECT, "1", NULL);
+	props = pw_properties_new(PW_KEY_NODE_AUTOCONNECT, "true", NULL);
 	if (data->path)
 		pw_properties_set(props, PW_KEY_NODE_TARGET, data->path);
+	pw_properties_set(props, PW_KEY_MEDIA_CLASS, "Stream/Input/Video");
 	pw_properties_set(props, PW_KEY_MEDIA_TYPE, "Video");
 	pw_properties_set(props, PW_KEY_MEDIA_CATEGORY, "Capture");
 	pw_properties_set(props, PW_KEY_MEDIA_ROLE, "Camera");
@@ -473,47 +475,41 @@ static void make_node(struct data *data)
 			SPA_TYPE_INTERFACE_Node,
 			SPA_VERSION_NODE,
 			&impl_node, data);
-	pw_remote_export(data->remote, SPA_TYPE_INTERFACE_Node, props, &data->impl_node, 0);
+	pw_core_export(data->core, SPA_TYPE_INTERFACE_Node,
+			&props->dict, &data->impl_node, 0);
+	pw_properties_free(props);
 }
 
-static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remote_state state, const char *error)
+static void set_permissions(struct data *data)
 {
-	struct data *data = _data;
+	struct pw_permission permissions[2];
 
-	switch (state) {
-	case PW_REMOTE_STATE_ERROR:
-		printf("remote error: %s\n", error);
-		pw_main_loop_quit(data->loop);
-		break;
+	/* an example, set specific permissions on one object, this is the
+	 * core object. */
+	permissions[0] = PW_PERMISSION_INIT(PW_ID_CORE, PW_PERM_R | PW_PERM_X);
+	/* remove WX from all other objects */
+	permissions[1] = PW_PERMISSION_INIT(PW_ID_ANY, PW_PERM_R);
 
-	case PW_REMOTE_STATE_CONNECTED:
-	{
-		struct pw_permission permissions[2];
+	pw_client_update_permissions(
+			pw_core_get_client(data->core),
+			2, permissions);
+}
 
-		/* an example, set specific permissions on one object, this is the
-		 * core object. */
-		permissions[0].id = 0;
-		permissions[0].permissions = PW_PERM_R | PW_PERM_X;
-		/* remove WX from all other objects */
-		permissions[1].id = SPA_ID_INVALID;
-		permissions[1].permissions = PW_PERM_R;
+static void on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
+{
+	struct data *d = data;
 
-		pw_client_proxy_update_permissions(
-				pw_remote_get_client_proxy(data->remote),
-				2, permissions);
+	pw_log_error("error id:%u seq:%d res:%d (%s): %s",
+			id, seq, res, spa_strerror(res), message);
 
-		make_node(data);
-		break;
-	}
-	default:
-		printf("remote state: \"%s\"\n", pw_remote_state_as_string(state));
-		break;
+	if (id == 0) {
+		pw_main_loop_quit(d->loop);
 	}
 }
 
-static const struct pw_remote_events remote_events = {
-	PW_VERSION_REMOTE_EVENTS,
-	.state_changed = on_state_changed,
+static const struct pw_core_events core_events = {
+	PW_VERSION_CORE_EVENTS,
+	.error = on_core_error,
 };
 
 int main(int argc, char *argv[])
@@ -523,8 +519,7 @@ int main(int argc, char *argv[])
 	pw_init(&argc, &argv);
 
 	data.loop = pw_main_loop_new(NULL);
-	data.core = pw_core_new(pw_main_loop_get_loop(data.loop), NULL, 0);
-        data.remote = pw_remote_new(data.core, NULL, 0);
+	data.context = pw_context_new(pw_main_loop_get_loop(data.loop), NULL, 0);
 	data.path = argc > 1 ? argv[1] : NULL;
 
 	spa_hook_list_init(&data.hooks);
@@ -554,14 +549,20 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	pw_remote_add_listener(data.remote, &data.remote_listener, &remote_events, &data);
-
-        if (pw_remote_connect(data.remote) < 0)
+        data.core = pw_context_connect(data.context, NULL, 0);
+	if (data.core == NULL) {
+		printf("can't connect: %m\n");
 		return -1;
+	}
+	pw_core_add_listener(data.core, &data.core_listener, &core_events, &data);
+
+	set_permissions(&data);
+
+	make_node(&data);
 
 	pw_main_loop_run(data.loop);
 
-	pw_core_destroy(data.core);
+	pw_context_destroy(data.context);
 	pw_main_loop_destroy(data.loop);
 
 	return 0;

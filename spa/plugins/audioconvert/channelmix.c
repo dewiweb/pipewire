@@ -43,7 +43,7 @@
 
 #define NAME "channelmix"
 
-#define DEFAULT_RATE		44100
+#define DEFAULT_RATE		48000
 #define DEFAULT_CHANNELS	2
 
 #define MAX_SAMPLES	8192
@@ -245,7 +245,7 @@ static int setup_convert(struct impl *this,
 
 	emit_params_changed(this);
 
-	spa_log_info(this->log, NAME " %p: got channelmix features %08x:%08x identity:%d",
+	spa_log_debug(this->log, NAME " %p: got channelmix features %08x:%08x identity:%d",
 			this, this->cpu_flags, this->mix.cpu_flags,
 			this->mix.identity);
 
@@ -858,24 +858,26 @@ static int impl_node_process(void *object)
 	spa_return_val_if_fail(outio != NULL, -EIO);
 	spa_return_val_if_fail(inio != NULL, -EIO);
 
-	spa_log_trace_fp(this->log, NAME " %p: status %d %d", this, inio->status, outio->status);
+	spa_log_trace_fp(this->log, NAME " %p: status %p %d %d -> %p %d %d", this,
+			inio, inio->status, inio->buffer_id,
+			outio, outio->status, outio->buffer_id);
 
-	if (outio->status == SPA_STATUS_HAVE_DATA)
-		goto done;
+	if (SPA_UNLIKELY(outio->status == SPA_STATUS_HAVE_DATA))
+		return SPA_STATUS_HAVE_DATA;
 
-	if (inio->status != SPA_STATUS_HAVE_DATA)
+	if (SPA_UNLIKELY(inio->status != SPA_STATUS_HAVE_DATA))
 		return SPA_STATUS_NEED_DATA;
 
 	/* recycle */
-	if (outio->buffer_id < outport->n_buffers) {
+	if (SPA_LIKELY(outio->buffer_id < outport->n_buffers)) {
 		recycle_buffer(this, outio->buffer_id);
 		outio->buffer_id = SPA_ID_INVALID;
 	}
 
-	if (inio->buffer_id >= inport->n_buffers)
+	if (SPA_UNLIKELY(inio->buffer_id >= inport->n_buffers))
 		return inio->status = -EINVAL;
 
-	if ((dbuf = dequeue_buffer(this, outport)) == NULL)
+	if (SPA_UNLIKELY((dbuf = dequeue_buffer(this, outport)) == NULL))
 		return outio->status = -EPIPE;
 
 	sbuf = &inport->buffers[inio->buffer_id];
@@ -911,7 +913,6 @@ static int impl_node_process(void *object)
 
 	inio->status = SPA_STATUS_NEED_DATA;
 
-      done:
 	return SPA_STATUS_HAVE_DATA | SPA_STATUS_NEED_DATA;
 }
 
@@ -933,7 +934,7 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
 
@@ -942,7 +943,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct impl *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Node)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -971,7 +972,6 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	struct port *port;
-	uint32_t i;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -981,16 +981,8 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct impl *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_CPU:
-			this->cpu = support[i].data;
-			break;
-		}
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->cpu = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_CPU);
 
 	if (this->cpu)
 		this->cpu_flags = spa_cpu_get_flags(this->cpu);

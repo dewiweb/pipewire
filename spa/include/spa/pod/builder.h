@@ -137,7 +137,7 @@ static inline int spa_pod_builder_raw(struct spa_pod_builder *builder, const voi
 		spa_callbacks_call_res(&builder->callbacks, struct spa_pod_builder_callbacks, res,
 				overflow, 0, offset + size);
 	}
-	if (res == 0)
+	if (res == 0 && data)
 		memcpy(SPA_MEMBER(builder->data, offset, void), data, size);
 
 	builder->state.offset += size;
@@ -297,6 +297,14 @@ spa_pod_builder_bytes(struct spa_pod_builder *builder, const void *bytes, uint32
 	if ((r = spa_pod_builder_raw_padded(builder, bytes, len)) < 0)
 		res = r;
 	return res;
+}
+static inline void *
+spa_pod_builder_reserve_bytes(struct spa_pod_builder *builder, uint32_t len)
+{
+	uint32_t offset = builder->state.offset;
+	if (spa_pod_builder_bytes(builder, NULL, len) < 0)
+		return NULL;
+	return SPA_POD_BODY(spa_pod_builder_deref(builder, offset));
 }
 
 #define SPA_POD_INIT_Pointer(type,value) (struct spa_pod_pointer){ { sizeof(struct spa_pod_pointer_body), SPA_TYPE_Pointer }, { type, 0, value } }
@@ -459,7 +467,7 @@ static inline uint32_t spa_choice_from_id(char id)
 do {										\
 	switch (type) {								\
 	case 'b':								\
-		spa_pod_builder_bool(builder, va_arg(args, int));		\
+		spa_pod_builder_bool(builder, !!va_arg(args, int));		\
 		break;								\
 	case 'I':								\
 		spa_pod_builder_id(builder, va_arg(args, uint32_t));		\
@@ -555,7 +563,7 @@ spa_pod_builder_addv(struct spa_pod_builder *builder, va_list args)
 {
 	int res = 0;
 	struct spa_pod_frame *f = builder->state.frame;
-	uint32_t ftype = f ? f->pod.type : SPA_TYPE_None;
+	uint32_t ftype = f ? f->pod.type : (uint32_t)SPA_TYPE_None;
 
 	do {
 		const char *format;
@@ -621,26 +629,26 @@ static inline int spa_pod_builder_add(struct spa_pod_builder *builder, ...)
 
 #define spa_pod_builder_add_object(b,type,id,...)				\
 ({										\
-	struct spa_pod_frame f;							\
-	spa_pod_builder_push_object(b, &f, type, id);				\
+	struct spa_pod_frame _f;						\
+	spa_pod_builder_push_object(b, &_f, type, id);				\
 	spa_pod_builder_add(b, ##__VA_ARGS__, 0);				\
-	spa_pod_builder_pop(b, &f);						\
+	spa_pod_builder_pop(b, &_f);						\
 })
 
 #define spa_pod_builder_add_struct(b,...)					\
 ({										\
-	struct spa_pod_frame f;							\
-	spa_pod_builder_push_struct(b, &f);					\
+	struct spa_pod_frame _f;						\
+	spa_pod_builder_push_struct(b, &_f);					\
 	spa_pod_builder_add(b, ##__VA_ARGS__, NULL);				\
-	spa_pod_builder_pop(b, &f);						\
+	spa_pod_builder_pop(b, &_f);						\
 })
 
 #define spa_pod_builder_add_sequence(b,unit,...)				\
 ({										\
-	struct spa_pod_frame f;							\
-	spa_pod_builder_push_sequence(b, &f, unit);				\
+	struct spa_pod_frame _f;						\
+	spa_pod_builder_push_sequence(b, &_f, unit);				\
 	spa_pod_builder_add(b, ##__VA_ARGS__, 0, 0);				\
-	spa_pod_builder_pop(b, &f);						\
+	spa_pod_builder_pop(b, &_f);						\
 })
 
 /** Copy a pod structure */

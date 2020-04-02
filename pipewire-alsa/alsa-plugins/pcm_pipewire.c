@@ -1,22 +1,25 @@
-/*
- *  PCM - PipeWire plugin
+/* PCM - PipeWire plugin
  *
- *  Copyright (c) 2017 Wim Taymans <wim.taymans@gmail.com>
+ * Copyright © 2017 Wim Taymans
  *
- *   This library is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU Lesser General Public License as
- *   published by the Free Software Foundation; either version 2.1 of
- *   the License, or (at your option) any later version.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU Lesser General Public License for more details.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
  *
- *   You should have received a copy of the GNU Lesser General Public
- *   License along with this library; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #define __USE_GNU
@@ -39,6 +42,8 @@
 #include <spa/utils/result.h>
 
 #include <pipewire/pipewire.h>
+
+#define NAME "alsa-plugin"
 
 #define MIN_BUFFERS	3u
 #define MAX_BUFFERS	64u
@@ -63,20 +68,19 @@ typedef struct {
 	unsigned int sample_bits;
 	snd_pcm_uframes_t min_avail;
 
-	struct pw_loop *loop;
+	struct spa_system *system;
 	struct pw_thread_loop *main_loop;
 
-	struct pw_core *core;
+	struct pw_context *context;
 
-	struct pw_remote *remote;
-	struct spa_hook remote_listener;
+	struct pw_core *core;
+	struct spa_hook core_listener;
 
 	uint32_t flags;
 	struct pw_stream *stream;
 	struct spa_hook stream_listener;
 
         struct spa_audio_info_raw format;
-
 } snd_pcm_pipewire_t;
 
 static int snd_pcm_pipewire_stop(snd_pcm_ioplug_t *io);
@@ -91,7 +95,7 @@ static int pcm_poll_block_check(snd_pcm_ioplug_t *io)
 	    (io->state == SND_PCM_STATE_PREPARED && io->stream == SND_PCM_STREAM_CAPTURE)) {
 		avail = snd_pcm_avail_update(io->pcm);
 		if (avail >= 0 && avail < (snd_pcm_sframes_t)pw->min_avail) {
-			spa_system_eventfd_read(pw->loop->system, io->poll_fd, &val);
+			spa_system_eventfd_read(pw->system, io->poll_fd, &val);
 			return 1;
 		}
 	}
@@ -102,7 +106,7 @@ static int pcm_poll_block_check(snd_pcm_ioplug_t *io)
 static inline int pcm_poll_unblock_check(snd_pcm_ioplug_t *io)
 {
 	snd_pcm_pipewire_t *pw = io->private_data;
-	spa_system_eventfd_write(pw->loop->system, pw->fd, 1);
+	spa_system_eventfd_write(pw->system, pw->fd, 1);
 	return 1;
 }
 
@@ -111,14 +115,12 @@ static void snd_pcm_pipewire_free(snd_pcm_pipewire_t *pw)
 	if (pw) {
 		if (pw->main_loop)
 			pw_thread_loop_stop(pw->main_loop);
-		if (pw->core)
-			pw_core_destroy(pw->core);
+		if (pw->context)
+			pw_context_destroy(pw->context);
+		if (pw->fd >= 0)
+			spa_system_close(pw->system, pw->fd);
 		if (pw->main_loop)
 			pw_thread_loop_destroy(pw->main_loop);
-		if (pw->loop)
-			pw_loop_destroy(pw->loop);
-		if (pw->fd >= 0)
-			spa_system_close(pw->loop->system, pw->fd);
 		free(pw);
 	}
 }
@@ -193,7 +195,7 @@ snd_pcm_pipewire_process_playback(snd_pcm_pipewire_t *pw, struct pw_buffer *b)
 	ptr = SPA_MEMBER(d[0].data, offset, void);
 
 	nframes = nbytes / bpf;
-	pw_log_trace("%d %d %lu %d %d %p %d", nbytes, avail, nframes, filled, offset, ptr, io->state);
+	pw_log_trace(NAME" %p: %d %d %lu %d %d %p %d", pw, nbytes, avail, nframes, filled, offset, ptr, io->state);
 
 	for (channel = 0; channel < io->channels; channel++) {
 		pwareas[channel].addr = ptr;
@@ -202,7 +204,7 @@ snd_pcm_pipewire_process_playback(snd_pcm_pipewire_t *pw, struct pw_buffer *b)
 	}
 
 	if (io->state != SND_PCM_STATE_RUNNING && io->state != SND_PCM_STATE_DRAINING) {
-		pw_log_trace("silence %lu frames %d", nframes, io->state);
+		pw_log_trace(NAME" %p: silence %lu frames %d", pw, nframes, io->state);
 		for (channel = 0; channel < io->channels; channel++)
 			snd_pcm_area_silence(&pwareas[channel], 0, nframes, io->format);
 		goto done;
@@ -272,7 +274,7 @@ snd_pcm_pipewire_process_record(snd_pcm_pipewire_t *pw, struct pw_buffer *b)
 	nbytes = SPA_MIN(avail, maxsize - offset);
 	ptr = SPA_MEMBER(d[0].data, offset, void);
 
-	pw_log_trace("%d %d %d %p", nbytes, avail, offset, ptr);
+	pw_log_trace(NAME" %p: %d %d %d %p", pw, nbytes, avail, offset, ptr);
 	nframes = nbytes / bpf;
 
 	for (channel = 0; channel < io->channels; channel++) {
@@ -310,7 +312,7 @@ snd_pcm_pipewire_process_record(snd_pcm_pipewire_t *pw, struct pw_buffer *b)
 	return 0;
 }
 
-static void on_stream_format_changed(void *data, const struct spa_pod *format)
+static void on_stream_param_changed(void *data, uint32_t id, const struct spa_pod *param)
 {
 	snd_pcm_pipewire_t *pw = data;
 	snd_pcm_ioplug_t *io = &pw->io;
@@ -322,12 +324,15 @@ static void on_stream_format_changed(void *data, const struct spa_pod *format)
 	uint32_t buffers;
 	uint32_t size;
 
+	if (param == NULL || id != SPA_PARAM_Format)
+		return;
+
 	io->period_size = pw->min_avail;
 	buffers = SPA_CLAMP(io->buffer_size / io->period_size, MIN_BUFFERS, MAX_BUFFERS);
 	size = io->period_size * stride;
 
-	pw_log_info("buffer_size:%lu period_size:%lu buffers:%u stride:%u size:%u min_avail:%lu",
-			io->buffer_size, io->period_size, buffers, stride, size, pw->min_avail);
+	pw_log_info(NAME" %p: buffer_size:%lu period_size:%lu buffers:%u stride:%u size:%u min_avail:%lu",
+			pw, io->buffer_size, io->period_size, buffers, stride, size, pw->min_avail);
 
 	params[n_params++] = spa_pod_builder_add_object(&b,
 	                SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
@@ -337,7 +342,7 @@ static void on_stream_format_changed(void *data, const struct spa_pod *format)
 			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(stride),
 			SPA_PARAM_BUFFERS_align,   SPA_POD_Int(16));
 
-	pw_stream_finish_format(pw->stream, 0, params, n_params);
+	pw_stream_update_params(pw->stream, params, n_params);
 }
 
 static void on_stream_process(void *data)
@@ -360,7 +365,7 @@ static void on_stream_process(void *data)
 
 static const struct pw_stream_events stream_events = {
 	PW_VERSION_STREAM_EVENTS,
-        .format_changed = on_stream_format_changed,
+        .param_changed = on_stream_param_changed,
         .process = on_stream_process,
 };
 
@@ -386,7 +391,8 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 	min_period = (MIN_PERIOD * io->rate / 48000);
 	pw->min_avail = SPA_MAX(pw->min_avail, min_period);
 
-	pw_log_debug("prepare %d %p %lu %ld", pw->error, pw->stream, io->period_size, pw->min_avail);
+	pw_log_debug(NAME" %p: prepare %d %p %lu %ld", pw,
+			pw->error, pw->stream, io->period_size, pw->min_avail);
 	if (!pw->error && pw->stream != NULL)
 		goto done;
 
@@ -404,7 +410,7 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 			"Playback" : "Capture");
 	pw_properties_set(props, PW_KEY_MEDIA_ROLE, "Music");
 
-	pw->stream = pw_stream_new(pw->remote, pw->node_name, props);
+	pw->stream = pw_stream_new(pw->core, pw->node_name, props);
 	if (pw->stream == NULL)
 		goto error;
 
@@ -516,7 +522,7 @@ static int snd_pcm_pipewire_hw_params(snd_pcm_ioplug_t * io,
 	snd_pcm_pipewire_t *pw = io->private_data;
 	bool planar;
 
-	pw_log_debug("hw_params %lu %lu", io->buffer_size, io->period_size);
+	pw_log_debug(NAME" %p: hw_params %lu %lu", pw, io->buffer_size, io->period_size);
 
 	switch(io->access) {
 	case SND_PCM_ACCESS_MMAP_INTERLEAVED:
@@ -701,7 +707,8 @@ static snd_pcm_ioplug_callback_t pipewire_pcm_callback = {
 	.query_chmaps = snd_pcm_pipewire_query_chmaps,
 };
 
-static int pipewire_set_hw_constraint(snd_pcm_pipewire_t *pw)
+static int pipewire_set_hw_constraint(snd_pcm_pipewire_t *pw, int rate,
+		snd_pcm_format_t format, int channels, int period_bytes)
 {
 	unsigned int access_list[] = {
 		SND_PCM_ACCESS_MMAP_INTERLEAVED,
@@ -722,87 +729,86 @@ static int pipewire_set_hw_constraint(snd_pcm_pipewire_t *pw)
 		SND_PCM_FORMAT_S24_3BE,
 		SND_PCM_FORMAT_U8,
 	};
-
+	int min_rate;
+	int max_rate;
+	int min_channels;
+	int max_channels;
+	int min_period_bytes;
+	int max_period_bytes;
 	int err;
+
+	if (rate > 0) {
+		min_rate = max_rate = rate;
+	} else {
+		min_rate = 1;
+		max_rate = MAX_RATE;
+	}
+	if (channels > 0) {
+		min_channels = max_channels = channels;
+	} else {
+		min_channels = 1;
+		max_channels = MAX_CHANNELS;
+	}
+	if (period_bytes > 0) {
+		min_period_bytes = max_period_bytes = period_bytes;
+	} else {
+		min_period_bytes = 128;
+		max_period_bytes = 2*1024*1024;
+	}
 
 	if ((err = snd_pcm_ioplug_set_param_list(&pw->io, SND_PCM_IOPLUG_HW_ACCESS,
 						 SPA_N_ELEMENTS(access_list), access_list)) < 0 ||
-	    (err = snd_pcm_ioplug_set_param_list(&pw->io, SND_PCM_IOPLUG_HW_FORMAT,
-						 SPA_N_ELEMENTS(format_list), format_list)) < 0 ||
 	    (err = snd_pcm_ioplug_set_param_minmax(&pw->io, SND_PCM_IOPLUG_HW_CHANNELS,
-						   1, MAX_CHANNELS)) < 0 ||
+						   min_channels, max_channels)) < 0 ||
 	    (err = snd_pcm_ioplug_set_param_minmax(&pw->io, SND_PCM_IOPLUG_HW_RATE,
-						   1, MAX_RATE)) < 0 ||
+						   min_rate, max_rate)) < 0 ||
 	    (err = snd_pcm_ioplug_set_param_minmax(&pw->io, SND_PCM_IOPLUG_HW_BUFFER_BYTES,
                                                    16*1024, 4*1024*1024)) < 0 ||
-	    (err = snd_pcm_ioplug_set_param_minmax(&pw->io, SND_PCM_IOPLUG_HW_PERIOD_BYTES,
-                                                   128, 2*1024*1024)) < 0 ||
+	    (err = snd_pcm_ioplug_set_param_minmax(&pw->io,
+						   SND_PCM_IOPLUG_HW_PERIOD_BYTES,
+						   min_period_bytes,
+						   max_period_bytes)) < 0 ||
 	    (err = snd_pcm_ioplug_set_param_minmax(&pw->io, SND_PCM_IOPLUG_HW_PERIODS,
 						   3, 64)) < 0)
 		return err;
 
+	if (format != SND_PCM_FORMAT_UNKNOWN) {
+		err = snd_pcm_ioplug_set_param_list(&pw->io,
+				SND_PCM_IOPLUG_HW_FORMAT,
+				1, (unsigned int *)&format);
+		if (err < 0)
+			return err;
+	} else {
+		err = snd_pcm_ioplug_set_param_list(&pw->io,
+				SND_PCM_IOPLUG_HW_FORMAT,
+				SPA_N_ELEMENTS(format_list),
+				format_list);
+		if (err < 0)
+			return err;
+	}
+
 	return 0;
 }
 
-static void on_remote_state_changed(void *data, enum pw_remote_state old,
-			enum pw_remote_state state, const char *error)
+static void on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
 {
 	snd_pcm_pipewire_t *pw = data;
 
-        switch (state) {
-        case PW_REMOTE_STATE_ERROR:
-		pw_log_error("error %s", error);
-		/* fallthrough */
-        case PW_REMOTE_STATE_UNCONNECTED:
+	pw_log_error(NAME" %p: error id:%u seq:%d res:%d (%s): %s", pw,
+			id, seq, res, spa_strerror(res), message);
+
+	if (id == 0) {
 		pw->error = true;
 		if (pw->fd != -1)
 			pcm_poll_unblock_check(&pw->io);
-		/* fallthrough */
-        case PW_REMOTE_STATE_CONNECTED:
-                pw_thread_loop_signal(pw->main_loop, false);
-                break;
-	default:
-                break;
-        }
+	}
+	pw_thread_loop_signal(pw->main_loop, false);
 }
 
-static const struct pw_remote_events remote_events = {
-	PW_VERSION_REMOTE_EVENTS,
-        .state_changed = on_remote_state_changed,
+static const struct pw_core_events core_events = {
+	PW_VERSION_CORE_EVENTS,
+        .error = on_core_error,
 };
-
-static int remote_connect_sync(snd_pcm_pipewire_t *pw)
-{
-	const char *error = NULL;
-	enum pw_remote_state state;
-	int res;
-
-	pw_thread_loop_lock(pw->main_loop);
-
-	if ((res = pw_remote_connect(pw->remote)) < 0) {
-		error = spa_strerror(res);
-		goto error;
-	}
-
-	while (true) {
-		state = pw_remote_get_state(pw->remote, &error);
-		if (state == PW_REMOTE_STATE_ERROR)
-			goto error;
-
-		if (state == PW_REMOTE_STATE_CONNECTED)
-			break;
-
-		pw_thread_loop_wait(pw->main_loop);
-	}
-     exit:
-	pw_thread_loop_unlock(pw->main_loop);
-
-	return res;
-
-     error:
-	SNDERR("PipeWire: Unable to connect: %s\n", error);
-	goto exit;
-}
 
 static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 			     const char *node_name,
@@ -810,12 +816,17 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 			     const char *capture_node,
 			     snd_pcm_stream_t stream,
 			     int mode,
-			     uint32_t flags)
+			     uint32_t flags,
+			     int rate,
+			     snd_pcm_format_t format,
+			     int channels,
+			     int period_bytes)
 {
 	snd_pcm_pipewire_t *pw;
 	int err;
 	const char *str;
 	struct pw_properties *props;
+	struct pw_loop *loop;
 
 	assert(pcmp);
 	pw = calloc(1, sizeof(*pw));
@@ -824,31 +835,38 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 
 	str = getenv("PIPEWIRE_NODE");
 
-	pw_log_debug("open %s %d %d %08x '%s'", name, stream, mode, flags, str);
+	pw_log_debug(NAME" %p: open %s %d %d %08x %d %s %d %d '%s'", pw, name,
+			stream, mode, flags, rate,
+			format != SND_PCM_FORMAT_UNKNOWN ? snd_pcm_format_name(format) : "none",
+			channels, period_bytes, str);
 
 	pw->fd = -1;
 	pw->io.poll_fd = -1;
 	pw->flags = flags;
 
 	if (node_name == NULL)
-		err = asprintf(&pw->node_name, "ALSA %s",
+		pw->node_name = spa_aprintf("ALSA %s",
 			       stream == SND_PCM_STREAM_PLAYBACK ? "Playback" : "Capture");
 	else
 		pw->node_name = strdup(node_name);
 
-	pw->target = SPA_ID_INVALID;
+	if (pw->node_name == NULL)
+		return -errno;
+
+	pw->target = PW_ID_ANY;
 	if (str != NULL)
 		pw->target = atoi(str);
 	else {
 		if (stream == SND_PCM_STREAM_PLAYBACK)
-			pw->target = playback_node ? (uint32_t)atoi(playback_node) : SPA_ID_INVALID;
+			pw->target = playback_node ? (uint32_t)atoi(playback_node) : PW_ID_ANY;
 		else
-			pw->target = capture_node ? (uint32_t)atoi(capture_node) : SPA_ID_INVALID;
+			pw->target = capture_node ? (uint32_t)atoi(capture_node) : PW_ID_ANY;
 	}
 
-        pw->loop = pw_loop_new(NULL);
-        pw->main_loop = pw_thread_loop_new(pw->loop, "alsa-pipewire");
-        pw->core = pw_core_new(pw->loop, NULL, 0);
+	pw->main_loop = pw_thread_loop_new("alsa-pipewire", NULL);
+	loop = pw_thread_loop_get_loop(pw->main_loop);
+	pw->system = loop->system;
+	pw->context = pw_context_new(loop, NULL, 0);
 
 	props = pw_properties_new(NULL, NULL);
 	str = pw_get_prgname();
@@ -857,16 +875,20 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 	else
 		pw_properties_set(props, PW_KEY_APP_NAME, "ALSA plug-in");
 
-	pw->remote = pw_remote_new(pw->core, props, 0);
-	pw_remote_add_listener(pw->remote, &pw->remote_listener, &remote_events, pw);
-
 	if ((err = pw_thread_loop_start(pw->main_loop)) < 0)
 		goto error;
 
-	if ((err = remote_connect_sync(pw)) < 0)
+	pw_thread_loop_lock(pw->main_loop);
+	pw->core = pw_context_connect(pw->context, props, 0);
+	if (pw->core == NULL) {
+		err = -errno;
+		pw_thread_loop_unlock(pw->main_loop);
 		goto error;
+	}
+	pw_core_add_listener(pw->core, &pw->core_listener, &core_events, pw);
+	pw_thread_loop_unlock(pw->main_loop);
 
-	pw->fd = spa_system_eventfd_create(pw->loop->system, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+	pw->fd = spa_system_eventfd_create(pw->system, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
 
 	pw->io.version = SND_PCM_IOPLUG_VERSION;
 	pw->io.name = "ALSA <-> PipeWire PCM I/O Plugin";
@@ -879,9 +901,10 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 	if ((err = snd_pcm_ioplug_create(&pw->io, name, stream, mode)) < 0)
 		goto error;
 
-	pw_log_debug("open %s %d %d", name, pw->io.stream, mode);
+	pw_log_debug(NAME" %p: open %s %d %d", pw, name, pw->io.stream, mode);
 
-	if ((err = pipewire_set_hw_constraint(pw)) < 0)
+	if ((err = pipewire_set_hw_constraint(pw, rate, format, channels,
+					period_bytes)) < 0)
 		goto error;
 
 	*pcmp = pw->io.pcm;
@@ -902,6 +925,10 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 	const char *server_name = NULL;
 	const char *playback_node = NULL;
 	const char *capture_node = NULL;
+	snd_pcm_format_t format = SND_PCM_FORMAT_UNKNOWN;
+	int rate = 0;
+	int channels = 0;
+	int period_bytes = 0;
 	uint32_t flags = 0;
 	int err;
 
@@ -935,11 +962,52 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 				flags |= PW_STREAM_FLAG_EXCLUSIVE;
 			continue;
 		}
+		if (strcmp(id, "rate") == 0) {
+			long val;
+
+			if (snd_config_get_integer(n, &val) == 0)
+				rate = val;
+			else
+				SNDERR("%s: invalid type", id);
+			continue;
+		}
+		if (strcmp(id, "format") == 0) {
+			const char *str;
+
+			if (snd_config_get_string(n, &str) == 0) {
+				format = snd_pcm_format_value(str);
+				if (format == SND_PCM_FORMAT_UNKNOWN)
+					SNDERR("%s: invalid value %s", id, str);
+			} else {
+				SNDERR("%s: invalid type", id);
+			}
+			continue;
+		}
+		if (strcmp(id, "channels") == 0) {
+			long val;
+
+			if (snd_config_get_integer(n, &val) == 0)
+				channels = val;
+			else
+				SNDERR("%s: invalid type", id);
+			continue;
+		}
+		if (strcmp(id, "period_bytes") == 0) {
+			long val;
+
+			if (snd_config_get_integer(n, &val) == 0)
+				period_bytes = val;
+			else
+				SNDERR("%s: invalid type", id);
+			continue;
+		}
 		SNDERR("Unknown field %s", id);
 		return -EINVAL;
 	}
 
-	err = snd_pcm_pipewire_open(pcmp, name, node_name, playback_node, capture_node, stream, mode, flags);
+	err = snd_pcm_pipewire_open(pcmp, name, node_name, playback_node,
+			capture_node, stream, mode, flags, rate, format,
+			channels, period_bytes);
 
 	return err;
 }

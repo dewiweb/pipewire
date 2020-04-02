@@ -44,7 +44,7 @@ struct marshal {
 /** \endcond */
 
 SPA_EXPORT
-struct pw_protocol *pw_protocol_new(struct pw_core *core,
+struct pw_protocol *pw_protocol_new(struct pw_context *context,
 				    const char *name,
 				    size_t user_data_size)
 {
@@ -54,7 +54,7 @@ struct pw_protocol *pw_protocol_new(struct pw_core *core,
 	if (protocol == NULL)
 		return NULL;
 
-	protocol->core = core;
+	protocol->context = context;
 	protocol->name = strdup(name);
 
 	spa_list_init(&protocol->marshal_list);
@@ -65,11 +65,17 @@ struct pw_protocol *pw_protocol_new(struct pw_core *core,
 	if (user_data_size > 0)
 		protocol->user_data = SPA_MEMBER(protocol, sizeof(struct impl), void);
 
-	spa_list_append(&core->protocol_list, &protocol->link);
+	spa_list_append(&context->protocol_list, &protocol->link);
 
 	pw_log_debug(NAME" %p: Created protocol %s", protocol, name);
 
 	return protocol;
+}
+
+SPA_EXPORT
+struct pw_context *pw_protocol_get_context(struct pw_protocol *protocol)
+{
+	return protocol->context;
 }
 
 SPA_EXPORT
@@ -143,37 +149,35 @@ pw_protocol_add_marshal(struct pw_protocol *protocol,
 
 	spa_list_append(&protocol->marshal_list, &impl->link);
 
-	pw_log_debug(NAME" %p: Add marshal %d/%s:%d to protocol %s", protocol,
-			marshal->type, spa_debug_type_find_name(pw_type_info(), marshal->type),
-			marshal->version, protocol->name);
+	pw_log_debug(NAME" %p: Add marshal %s/%d to protocol %s", protocol,
+			marshal->type, marshal->version, protocol->name);
 
 	return 0;
 }
 
 SPA_EXPORT
 const struct pw_protocol_marshal *
-pw_protocol_get_marshal(struct pw_protocol *protocol, uint32_t type, uint32_t version, uint32_t flags)
+pw_protocol_get_marshal(struct pw_protocol *protocol, const char *type, uint32_t version, uint32_t flags)
 {
 	struct marshal *impl;
 
 	spa_list_for_each(impl, &protocol->marshal_list, link) {
-		if (impl->marshal->type == type &&
+		if (strcmp(impl->marshal->type, type) == 0 &&
 		    impl->marshal->version == version &&
 		    (impl->marshal->flags & flags) == flags)
                         return impl->marshal;
         }
-	pw_log_debug(NAME" %p: No marshal %d/%s:%d for protocol %s", protocol,
-			type, spa_debug_type_find_name(pw_type_info(), type),
-			version, protocol->name);
+	pw_log_debug(NAME" %p: No marshal %s/%d for protocol %s", protocol,
+			type, version, protocol->name);
 	return NULL;
 }
 
 SPA_EXPORT
-struct pw_protocol *pw_core_find_protocol(struct pw_core *core, const char *name)
+struct pw_protocol *pw_context_find_protocol(struct pw_context *context, const char *name)
 {
 	struct pw_protocol *protocol;
 
-	spa_list_for_each(protocol, &core->protocol_list, link) {
+	spa_list_for_each(protocol, &context->protocol_list, link) {
 		if (strcmp(protocol->name, name) == 0)
 			return protocol;
 	}

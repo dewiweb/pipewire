@@ -43,6 +43,8 @@
 #define CURSOR_HEIGHT	64
 #define CURSOR_BPP	4
 
+#define MAX_BUFFERS	64
+
 #define M_PI_M2 ( M_PI + M_PI )
 
 struct data {
@@ -96,7 +98,7 @@ static void on_timeout(void *userdata, uint64_t expirations)
 	pw_log_trace("timeout");
 
 	if ((b = pw_stream_dequeue_buffer(data->stream)) == NULL) {
-		pw_log_warn("out of buffers");
+		pw_log_warn("out of buffers: %m");
 		return;
 	}
 
@@ -188,8 +190,10 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
 	printf("stream state: \"%s\"\n", pw_stream_state_as_string(state));
 
 	switch (state) {
-	case PW_STREAM_STATE_CONFIGURE:
+	case PW_STREAM_STATE_PAUSED:
 		printf("node id: %d\n", pw_stream_get_node_id(data->stream));
+		pw_loop_update_timer(pw_main_loop_get_loop(data->loop),
+				data->timer, NULL, NULL, false);
 		break;
 	case PW_STREAM_STATE_STREAMING:
 	{
@@ -205,8 +209,6 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
 		break;
 	}
 	default:
-		pw_loop_update_timer(pw_main_loop_get_loop(data->loop),
-				data->timer, NULL, NULL, false);
 		break;
 	}
 }
@@ -221,6 +223,11 @@ static void on_stream_add_buffer(void *_data, struct pw_buffer *buffer)
 	unsigned int seals;
 
 	d = buf->datas;
+
+	if ((d[0].type & (1<<SPA_DATA_MemFd)) == 0) {
+		pw_log_error("unsupported data type %08x", d[0].type);
+		return;
+	}
 
 	/* create the memfd on the buffer, set the type and flags */
 	d[0].type = SPA_DATA_MemFd;
@@ -271,18 +278,19 @@ static void on_stream_remove_buffer(void *_data, struct pw_buffer *buffer)
 	close(d[0].fd);
 }
 
-/* Be notified when the stream format changes.
+/* Be notified when the stream param changes. We're only looking at the
+ * format param.
  *
- * We are now supposed to call pw_stream_finish_format() with success or
+ * We are now supposed to call pw_stream_update_params() with success or
  * failure, depending on if we can support the format. Because we gave
  * a list of supported formats, this should be ok.
  *
- * As part of pw_stream_finish_format() we can provide parameters that
+ * As part of pw_stream_update_params() we can provide parameters that
  * will control the buffer memory allocation. This includes the metadata
  * that we would like on our buffer, the size, alignment, etc.
  */
 static void
-on_stream_format_changed(void *_data, const struct spa_pod *format)
+on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 {
 	struct data *data = _data;
 	struct pw_stream *stream = data->stream;
@@ -290,21 +298,21 @@ on_stream_format_changed(void *_data, const struct spa_pod *format)
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
 	const struct spa_pod *params[5];
 
-	if (format == NULL) {
-		pw_stream_finish_format(stream, 0, NULL, 0);
+	if (param == NULL || id != SPA_PARAM_Format)
 		return;
-	}
-	spa_format_video_raw_parse(format, &data->format);
+
+	spa_format_video_raw_parse(param, &data->format);
 
 	data->stride = SPA_ROUND_UP_N(data->format.size.width * BPP, 4);
 
 	params[0] = spa_pod_builder_add_object(&b,
 		SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
-		SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(2, 1, 32),
-		SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
-		SPA_PARAM_BUFFERS_size,    SPA_POD_Int(data->stride * data->format.size.height),
-		SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(data->stride),
-		SPA_PARAM_BUFFERS_align,   SPA_POD_Int(16));
+		SPA_PARAM_BUFFERS_buffers,  SPA_POD_CHOICE_RANGE_Int(8, 2, MAX_BUFFERS),
+		SPA_PARAM_BUFFERS_blocks,   SPA_POD_Int(1),
+		SPA_PARAM_BUFFERS_size,     SPA_POD_Int(data->stride * data->format.size.height),
+		SPA_PARAM_BUFFERS_stride,   SPA_POD_Int(data->stride),
+		SPA_PARAM_BUFFERS_align,    SPA_POD_Int(16),
+		SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(1<<SPA_DATA_MemFd));
 
 	params[1] = spa_pod_builder_add_object(&b,
 		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
@@ -330,13 +338,13 @@ on_stream_format_changed(void *_data, const struct spa_pod *format)
 		SPA_PARAM_META_size, SPA_POD_Int(
 			CURSOR_META_SIZE(CURSOR_WIDTH,CURSOR_HEIGHT)));
 
-	pw_stream_finish_format(stream, 0, params, 5);
+	pw_stream_update_params(stream, params, 5);
 }
 
 static const struct pw_stream_events stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.state_changed = on_stream_state_changed,
-	.format_changed = on_stream_format_changed,
+	.param_changed = on_stream_param_changed,
 	.add_buffer = on_stream_add_buffer,
 	.remove_buffer = on_stream_remove_buffer,
 };
@@ -353,8 +361,8 @@ int main(int argc, char *argv[])
 	/* create a main loop */
 	data.loop = pw_main_loop_new(NULL);
 
-	/* create a simple stream, the simple stream manages to core and remote
-	 * objects for you if you don't need to deal with them
+	/* create a simple stream, the simple stream manages the core
+	 * object for you if you don't want to deal with them.
 	 *
 	 * We're making a new video provider. We need to set the media-class
 	 * property.
@@ -373,13 +381,13 @@ int main(int argc, char *argv[])
 			&stream_events,
 			&data);
 
-	/* make a timer to schedule out frames */
+	/* make a timer to schedule our frames */
 	data.timer = pw_loop_add_timer(pw_main_loop_get_loop(data.loop), on_timeout, &data);
 
 	/* build the extra parameter for the connection. Here we make an
 	 * EnumFormat parameter which lists the possible formats we can provide.
 	 * The server will select a format that matches and informs us about this
-	 * in the stream format_changed event.
+	 * in the stream param_changed event.
 	 */
 	params[0] = spa_pod_builder_add_object(&b,
 		SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
@@ -401,7 +409,7 @@ int main(int argc, char *argv[])
 	 * the server.  */
 	pw_stream_connect(data.stream,
 			  PW_DIRECTION_OUTPUT,
-			  SPA_ID_INVALID,
+			  PW_ID_ANY,
 			  PW_STREAM_FLAG_DRIVER |
 			  PW_STREAM_FLAG_ALLOC_BUFFERS,
 			  params, 1);

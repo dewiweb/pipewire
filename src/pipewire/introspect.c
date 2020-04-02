@@ -28,7 +28,7 @@
 
 #include "pipewire/pipewire.h"
 
-#include "pipewire/remote.h"
+#include "pipewire/core.h"
 
 SPA_EXPORT
 const char *pw_node_state_as_string(enum pw_node_state state)
@@ -200,15 +200,24 @@ struct pw_node_info *pw_node_info_update(struct pw_node_info *info,
 		info->props = pw_spa_dict_copy(update->props);
 	}
 	if (update->change_mask & PW_NODE_CHANGE_MASK_PARAMS) {
-		info->n_params = update->n_params;
-		free((void *) info->params);
-		if (update->params) {
-			size_t size = info->n_params * sizeof(struct spa_param_info);
-			info->params = malloc(size);
-			memcpy(info->params, update->params, size);
+		uint32_t i, user, n_params = update->n_params;;
+
+		info->params = realloc(info->params, n_params * sizeof(struct spa_param_info));
+		if (info->params == NULL)
+			n_params = 0;
+
+		for (i = 0; i < SPA_MIN(info->n_params, n_params); i++) {
+			user = info->params[i].user;
+			if (info->params[i].flags != update->params[i].flags)
+				user++;
+			info->params[i] = update->params[i];
+			info->params[i].user = user;
 		}
-		else
-			info->params = NULL;
+		info->n_params = n_params;
+		for (; i < info->n_params; i++) {
+			info->params[i] = update->params[i];
+			info->params[i].user = 1;
+		}
 	}
 	return info;
 }
@@ -248,15 +257,24 @@ struct pw_port_info *pw_port_info_update(struct pw_port_info *info,
 		info->props = pw_spa_dict_copy(update->props);
 	}
 	if (update->change_mask & PW_PORT_CHANGE_MASK_PARAMS) {
-		info->n_params = update->n_params;
-		free((void *) info->params);
-		if (update->params) {
-			size_t size = info->n_params * sizeof(struct spa_param_info);
-			info->params = malloc(size);
-			memcpy(info->params, update->params, size);
+		uint32_t i, user, n_params = update->n_params;;
+
+		info->params = realloc(info->params, n_params * sizeof(struct spa_param_info));
+		if (info->params == NULL)
+			n_params = 0;
+
+		for (i = 0; i < SPA_MIN(info->n_params, n_params); i++) {
+			user = info->params[i].user;
+			if (info->params[i].flags != update->params[i].flags)
+				user++;
+			info->params[i] = update->params[i];
+			info->params[i].user = user;
 		}
-		else
-			info->params = NULL;
+		info->n_params = n_params;
+		for (; i < info->n_params; i++) {
+			info->params[i] = update->params[i];
+			info->params[i].user = 1;
+		}
 	}
 	return info;
 }
@@ -285,7 +303,7 @@ struct pw_factory_info *pw_factory_info_update(struct pw_factory_info *info,
 
 		info->id = update->id;
 		info->name = update->name ? strdup(update->name) : NULL;
-		info->type = update->type;
+		info->type = update->type ? strdup(update->type) : NULL;
 		info->version = update->version;
 	}
 	info->change_mask = update->change_mask;
@@ -302,6 +320,7 @@ SPA_EXPORT
 void pw_factory_info_free(struct pw_factory_info *info)
 {
 	free((void *) info->name);
+	free((void *) info->type);
 	if (info->props)
 		pw_spa_dict_destroy(info->props);
 	free(info);
@@ -367,15 +386,24 @@ struct pw_device_info *pw_device_info_update(struct pw_device_info *info,
 		info->props = pw_spa_dict_copy(update->props);
 	}
 	if (update->change_mask & PW_DEVICE_CHANGE_MASK_PARAMS) {
-		info->n_params = update->n_params;
-		free((void *) info->params);
-		if (update->params) {
-			size_t size = info->n_params * sizeof(struct spa_param_info);
-			info->params = malloc(size);
-			memcpy(info->params, update->params, size);
+		uint32_t i, user, n_params = update->n_params;;
+
+		info->params = realloc(info->params, n_params * sizeof(struct spa_param_info));
+		if (info->params == NULL)
+			n_params = 0;
+
+		for (i = 0; i < SPA_MIN(info->n_params, n_params); i++) {
+			user = info->params[i].user;
+			if (info->params[i].flags != update->params[i].flags)
+				user++;
+			info->params[i] = update->params[i];
+			info->params[i].user = user;
 		}
-		else
-			info->params = NULL;
+		info->n_params = n_params;
+		for (; i < info->n_params; i++) {
+			info->params[i] = update->params[i];
+			info->params[i].user = 1;
+		}
 	}
 	return info;
 }

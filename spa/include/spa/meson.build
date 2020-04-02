@@ -6,7 +6,7 @@ spa_buffer_headers = [
 ]
 
 install_headers(spa_buffer_headers,
-  subdir : 'spa/buffer')
+  subdir : join_paths(spa_name, 'spa', 'buffer'))
 
 spa_control_headers = [
   'control/control.h',
@@ -14,7 +14,7 @@ spa_control_headers = [
 ]
 
 install_headers(spa_control_headers,
-  subdir : 'spa/control')
+  subdir : join_paths(spa_name, 'spa', 'control'))
 
 spa_debug_headers = [
   'debug/buffer.h',
@@ -26,14 +26,14 @@ spa_debug_headers = [
   'debug/types.h',
 ]
 install_headers(spa_debug_headers,
-  subdir : 'spa/debug')
+  subdir : join_paths(spa_name, 'spa', 'debug'))
 
 spa_graph_headers = [
   'graph/graph.h',
 ]
 
 install_headers(spa_graph_headers,
-  subdir : 'spa/graph')
+  subdir : join_paths(spa_name, 'spa', 'graph'))
 
 spa_monitor_headers = [
   'monitor/device.h',
@@ -41,30 +41,32 @@ spa_monitor_headers = [
 ]
 
 install_headers(spa_monitor_headers,
-  subdir : 'spa/monitor')
+  subdir : join_paths(spa_name, 'spa', 'monitor'))
 
 spa_node_headers = [
   'node/command.h',
   'node/event.h',
   'node/io.h',
+  'node/keys.h',
   'node/node.h',
   'node/type-info.h',
   'node/utils.h',
 ]
 
 install_headers(spa_node_headers,
-  subdir : 'spa/node')
+  subdir : join_paths(spa_name, 'spa', 'node'))
 
 spa_param_headers = [
   'param/format.h',
   'param/format-utils.h',
   'param/param.h',
+  'param/profiler.h',
   'param/props.h',
   'param/type-info.h',
 ]
 
 install_headers(spa_param_headers,
-  subdir : 'spa/param')
+  subdir : join_paths(spa_name, 'spa', 'param'))
 
 spa_pod_headers = [
   'pod/builder.h',
@@ -78,7 +80,7 @@ spa_pod_headers = [
   'pod/vararg.h',
 ]
 install_headers(spa_pod_headers,
-  subdir : 'spa/pod')
+  subdir : join_paths(spa_name, 'spa', 'pod'))
 
 spa_support_headers = [
   'support/cpu.h',
@@ -91,7 +93,7 @@ spa_support_headers = [
 ]
 
 install_headers(spa_support_headers,
-  subdir : 'spa/support')
+  subdir : join_paths(spa_name, 'spa', 'support'))
 
 spa_utils_headers = [
   'utils/defs.h',
@@ -107,7 +109,7 @@ spa_utils_headers = [
 ]
 
 install_headers(spa_utils_headers,
-  subdir : 'spa/utils')
+  subdir : join_paths(spa_name, 'spa', 'utils'))
 
 spa_audio_headers = [
   'param/audio/format.h',
@@ -118,7 +120,7 @@ spa_audio_headers = [
 ]
 
 install_headers(spa_audio_headers,
-  subdir : 'spa/param/audio')
+  subdir : join_paths(spa_name, 'spa', 'param', 'audio'))
 
 spa_video_headers = [
   'param/video/chroma.h',
@@ -132,4 +134,4 @@ spa_video_headers = [
 ]
 
 install_headers(spa_video_headers,
-  subdir : 'spa/param/video')
+  subdir : join_paths(spa_name, 'spa', 'param', 'video'))

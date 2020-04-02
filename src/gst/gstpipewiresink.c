@@ -119,10 +119,7 @@ gst_pipewire_sink_finalize (GObject * object)
 
   g_object_unref (pwsink->pool);
 
-  pw_thread_loop_destroy (pwsink->main_loop);
-  pwsink->main_loop = NULL;
-
-  pw_loop_destroy (pwsink->loop);
+  pw_thread_loop_destroy (pwsink->loop);
   pwsink->loop = NULL;
 
   if (pwsink->properties)
@@ -244,16 +241,16 @@ pool_activated (GstPipeWirePool *pool, GstPipeWireSink *sink)
   if (size == 0)
     spa_pod_builder_add (&b,
         SPA_PARAM_BUFFERS_size, SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
-	0);
+        0);
   else
     spa_pod_builder_add (&b,
         SPA_PARAM_BUFFERS_size, SPA_POD_CHOICE_RANGE_Int(size, size, INT32_MAX),
-	0);
+        0);
 
   spa_pod_builder_add (&b,
       SPA_PARAM_BUFFERS_stride,  SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
       SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(min_buffers, min_buffers,
-					       max_buffers ? max_buffers : INT32_MAX),
+                                               max_buffers ? max_buffers : INT32_MAX),
       SPA_PARAM_BUFFERS_align,   SPA_POD_Int(16),
       0);
   port_params[0] = spa_pod_builder_pop (&b, &f);
@@ -264,9 +261,9 @@ pool_activated (GstPipeWirePool *pool, GstPipeWireSink *sink)
       SPA_PARAM_META_size, SPA_POD_Int(sizeof (struct spa_meta_header)));
 
 
-  pw_thread_loop_lock (sink->main_loop);
-  pw_stream_finish_format (sink->stream, 0, port_params, 2);
-  pw_thread_loop_unlock (sink->main_loop);
+  pw_thread_loop_lock (sink->loop);
+  pw_stream_update_params (sink->stream, port_params, 2);
+  pw_thread_loop_unlock (sink->loop);
 }
 
 static void
@@ -281,10 +278,9 @@ gst_pipewire_sink_init (GstPipeWireSink * sink)
 
   g_queue_init (&sink->queue);
 
-  sink->loop = pw_loop_new (NULL);
-  sink->main_loop = pw_thread_loop_new (sink->loop, "pipewire-sink-loop");
-  sink->core = pw_core_new (sink->loop, NULL, 0);
-  GST_DEBUG ("loop %p %p", sink->loop, sink->main_loop);
+  sink->loop = pw_thread_loop_new ("pipewire-sink-loop", NULL);
+  sink->context = pw_context_new (pw_thread_loop_get_loop(sink->loop), NULL, 0);
+  GST_DEBUG ("loop %p context %p", sink->loop, sink->context);
 }
 
 static GstCaps *
@@ -406,7 +402,7 @@ on_add_buffer (void *_data, struct pw_buffer *b)
 {
   GstPipeWireSink *pwsink = _data;
   gst_pipewire_pool_wrap_buffer (pwsink->pool, b);
-  pw_thread_loop_signal (pwsink->main_loop, FALSE);
+  pw_thread_loop_signal (pwsink->loop, FALSE);
 }
 
 static void
@@ -455,7 +451,7 @@ do_send_buffer (GstPipeWireSink *pwsink)
 
   if ((res = pw_stream_queue_buffer (pwsink->stream, data->b)) < 0) {
     g_warning ("can't send buffer %s", spa_strerror(res));
-    pw_thread_loop_signal (pwsink->main_loop, FALSE);
+    pw_thread_loop_signal (pwsink->loop, FALSE);
   } else
     pwsink->need_ready--;
 }
@@ -488,8 +484,6 @@ on_state_changed (void *data, enum pw_stream_state old, enum pw_stream_state sta
   switch (state) {
     case PW_STREAM_STATE_UNCONNECTED:
     case PW_STREAM_STATE_CONNECTING:
-    case PW_STREAM_STATE_CONFIGURE:
-    case PW_STREAM_STATE_READY:
     case PW_STREAM_STATE_PAUSED:
     case PW_STREAM_STATE_STREAMING:
       break;
@@ -498,16 +492,16 @@ on_state_changed (void *data, enum pw_stream_state old, enum pw_stream_state sta
           ("stream error: %s", error), (NULL));
       break;
   }
-  pw_thread_loop_signal (pwsink->main_loop, FALSE);
+  pw_thread_loop_signal (pwsink->loop, FALSE);
 }
 
 static void
-on_format_changed (void *data, const struct spa_pod *format)
+on_param_changed (void *data, uint32_t id, const struct spa_pod *param)
 {
   GstPipeWireSink *pwsink = data;
 
-  if (format == NULL)
-	  return;
+  if (param == NULL || id != SPA_PARAM_Format)
+          return;
 
   if (gst_buffer_pool_is_active (GST_BUFFER_POOL_CAST (pwsink->pool)))
     pool_activated (pwsink->pool, pwsink);
@@ -526,7 +520,7 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
 
   possible = gst_caps_to_format_all (caps, SPA_PARAM_EnumFormat);
 
-  pw_thread_loop_lock (pwsink->main_loop);
+  pw_thread_loop_lock (pwsink->loop);
   state = pw_stream_get_state (pwsink->stream, &error);
 
   if (state == PW_STREAM_STATE_ERROR)
@@ -542,7 +536,7 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
 
     pw_stream_connect (pwsink->stream,
                           PW_DIRECTION_OUTPUT,
-                          pwsink->path ? (uint32_t)atoi(pwsink->path) : SPA_ID_INVALID,
+                          pwsink->path ? (uint32_t)atoi(pwsink->path) : PW_ID_ANY,
                           flags,
                           (const struct spa_pod **) possible->pdata,
                           possible->len);
@@ -550,18 +544,18 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
     while (TRUE) {
       state = pw_stream_get_state (pwsink->stream, &error);
 
-      if (state == PW_STREAM_STATE_READY)
+      if (state == PW_STREAM_STATE_PAUSED)
         break;
 
       if (state == PW_STREAM_STATE_ERROR)
         goto start_error;
 
-      pw_thread_loop_wait (pwsink->main_loop);
+      pw_thread_loop_wait (pwsink->loop);
     }
   }
   res = TRUE;
 
-  pw_thread_loop_unlock (pwsink->main_loop);
+  pw_thread_loop_unlock (pwsink->loop);
 
   pwsink->negotiated = res;
 
@@ -570,7 +564,7 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
 start_error:
   {
     GST_ERROR ("could not start stream: %s", error);
-    pw_thread_loop_unlock (pwsink->main_loop);
+    pw_thread_loop_unlock (pwsink->loop);
     g_ptr_array_unref (possible);
     return FALSE;
   }
@@ -588,7 +582,7 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
   if (!pwsink->negotiated)
     goto not_negotiated;
 
-  pw_thread_loop_lock (pwsink->main_loop);
+  pw_thread_loop_lock (pwsink->loop);
   if (pw_stream_get_state (pwsink->stream, &error) != PW_STREAM_STATE_STREAMING)
     goto done;
 
@@ -618,7 +612,7 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
     do_send_buffer (pwsink);
 
 done:
-  pw_thread_loop_unlock (pwsink->main_loop);
+  pw_thread_loop_unlock (pwsink->loop);
 
   return res;
 
@@ -643,12 +637,12 @@ copy_properties (GQuark field_id,
 }
 
 static const struct pw_stream_events stream_events = {
-	PW_VERSION_STREAM_EVENTS,
-	.state_changed = on_state_changed,
-	.format_changed = on_format_changed,
-	.add_buffer = on_add_buffer,
-	.remove_buffer = on_remove_buffer,
-	.process = on_process,
+        PW_VERSION_STREAM_EVENTS,
+        .state_changed = on_state_changed,
+        .param_changed = on_param_changed,
+        .add_buffer = on_add_buffer,
+        .remove_buffer = on_remove_buffer,
+        .process = on_process,
 };
 
 static gboolean
@@ -666,16 +660,16 @@ gst_pipewire_sink_start (GstBaseSink * basesink)
     props = NULL;
   }
 
-  pw_thread_loop_lock (pwsink->main_loop);
-  pwsink->stream = pw_stream_new (pwsink->remote, pwsink->client_name, props);
+  pw_thread_loop_lock (pwsink->loop);
+  pwsink->stream = pw_stream_new (pwsink->core, pwsink->client_name, props);
   pwsink->pool->stream = pwsink->stream;
 
   pw_stream_add_listener(pwsink->stream,
-			 &pwsink->stream_listener,
-			 &stream_events,
-			 pwsink);
+                         &pwsink->stream_listener,
+                         &stream_events,
+                         pwsink);
 
-  pw_thread_loop_unlock (pwsink->main_loop);
+  pw_thread_loop_unlock (pwsink->loop);
 
   return TRUE;
 }
@@ -685,77 +679,37 @@ gst_pipewire_sink_stop (GstBaseSink * basesink)
 {
   GstPipeWireSink *pwsink = GST_PIPEWIRE_SINK (basesink);
 
-  pw_thread_loop_lock (pwsink->main_loop);
+  pw_thread_loop_lock (pwsink->loop);
   if (pwsink->stream) {
     pw_stream_disconnect (pwsink->stream);
     pw_stream_destroy (pwsink->stream);
     pwsink->stream = NULL;
     pwsink->pool->stream = NULL;
   }
-  pw_thread_loop_unlock (pwsink->main_loop);
+  pw_thread_loop_unlock (pwsink->loop);
 
   pwsink->negotiated = FALSE;
 
   return TRUE;
 }
 
-static void
-on_remote_state_changed (void *data, enum pw_remote_state old, enum pw_remote_state state, const char *error)
-{
-  GstPipeWireSink *pwsink = data;
-
-  GST_DEBUG ("got remote state %d", state);
-
-  switch (state) {
-    case PW_REMOTE_STATE_UNCONNECTED:
-    case PW_REMOTE_STATE_CONNECTING:
-    case PW_REMOTE_STATE_CONNECTED:
-      break;
-    case PW_REMOTE_STATE_ERROR:
-      GST_ELEMENT_ERROR (pwsink, RESOURCE, FAILED,
-          ("remote error: %s", error), (NULL));
-      break;
-  }
-  pw_thread_loop_signal (pwsink->main_loop, FALSE);
-}
-
-static const struct pw_remote_events remote_events = {
-	PW_VERSION_REMOTE_EVENTS,
-	.state_changed = on_remote_state_changed,
-};
-
 static gboolean
 gst_pipewire_sink_open (GstPipeWireSink * pwsink)
 {
-  const char *error = NULL;
-
-  if (pw_thread_loop_start (pwsink->main_loop) < 0)
+  if (pw_thread_loop_start (pwsink->loop) < 0)
     goto mainloop_error;
 
-  pw_thread_loop_lock (pwsink->main_loop);
-  pwsink->remote = pw_remote_new (pwsink->core, NULL, 0);
-
-  pw_remote_add_listener (pwsink->remote,
-			  &pwsink->remote_listener,
-			  &remote_events, pwsink);
+  pw_thread_loop_lock (pwsink->loop);
 
   if (pwsink->fd == -1)
-    pw_remote_connect (pwsink->remote);
+    pwsink->core = pw_context_connect (pwsink->context, NULL, 0);
   else
-    pw_remote_connect_fd (pwsink->remote, dup(pwsink->fd));
+    pwsink->core = pw_context_connect_fd (pwsink->context, dup(pwsink->fd), NULL, 0);
 
-  while (TRUE) {
-    enum pw_remote_state state = pw_remote_get_state (pwsink->remote, &error);
+  if (pwsink->core == NULL)
+    goto connect_error;
 
-    if (state == PW_REMOTE_STATE_CONNECTED)
-      break;
-
-    if (state == PW_REMOTE_STATE_ERROR)
-      goto connect_error;
-
-    pw_thread_loop_wait (pwsink->main_loop);
-  }
-  pw_thread_loop_unlock (pwsink->main_loop);
+  pw_thread_loop_unlock (pwsink->loop);
 
   return TRUE;
 
@@ -768,7 +722,9 @@ mainloop_error:
   }
 connect_error:
   {
-    pw_thread_loop_unlock (pwsink->main_loop);
+    GST_ELEMENT_ERROR (pwsink, RESOURCE, FAILED,
+        ("Failed to connect"), (NULL));
+    pw_thread_loop_unlock (pwsink->loop);
     return FALSE;
   }
 }
@@ -776,41 +732,22 @@ connect_error:
 static gboolean
 gst_pipewire_sink_close (GstPipeWireSink * pwsink)
 {
-  const char *error = NULL;
-
-  pw_thread_loop_lock (pwsink->main_loop);
+  pw_thread_loop_lock (pwsink->loop);
   if (pwsink->stream) {
     pw_stream_disconnect (pwsink->stream);
   }
-  if (pwsink->remote) {
-    pw_remote_disconnect (pwsink->remote);
-
-    while (TRUE) {
-      enum pw_remote_state state = pw_remote_get_state (pwsink->remote, &error);
-
-      if (state == PW_REMOTE_STATE_UNCONNECTED)
-        break;
-
-      if (state == PW_REMOTE_STATE_ERROR)
-        break;
-
-      pw_thread_loop_wait (pwsink->main_loop);
-    }
+  if (pwsink->core) {
+    pw_core_disconnect (pwsink->core);
+    pwsink->core = NULL;
   }
-  pw_thread_loop_unlock (pwsink->main_loop);
+  pw_thread_loop_unlock (pwsink->loop);
 
-  pw_thread_loop_stop (pwsink->main_loop);
+  pw_thread_loop_stop (pwsink->loop);
 
   if (pwsink->stream) {
     pw_stream_destroy (pwsink->stream);
     pwsink->stream = NULL;
   }
-
-  if (pwsink->remote) {
-    pw_remote_destroy (pwsink->remote);
-    pwsink->remote = NULL;
-  }
-
   return TRUE;
 }
 

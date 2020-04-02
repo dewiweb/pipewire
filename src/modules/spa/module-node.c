@@ -31,11 +31,7 @@
 #include <getopt.h>
 #include <limits.h>
 
-#include <pipewire/core.h>
-#include <pipewire/keys.h>
-#include <pipewire/log.h>
-#include <pipewire/module.h>
-#include <pipewire/utils.h>
+#include <pipewire/impl.h>
 
 #include "spa-node.h"
 
@@ -49,8 +45,8 @@ static const struct spa_dict_item module_props[] = {
 };
 
 struct node_data {
-	struct pw_node *this;
-	struct pw_core *core;
+	struct pw_impl_node *this;
+	struct pw_context *context;
 	struct pw_properties *properties;
 
 	struct spa_hook module_listener;
@@ -60,22 +56,22 @@ static void module_destroy(void *_data)
 {
 	struct node_data *data = _data;
 	spa_hook_remove(&data->module_listener);
-	pw_node_destroy(data->this);
+	pw_impl_node_destroy(data->this);
 }
 
-static const struct pw_module_events module_events = {
-	PW_VERSION_MODULE_EVENTS,
+static const struct pw_impl_module_events module_events = {
+	PW_VERSION_IMPL_MODULE_EVENTS,
 	.destroy = module_destroy,
 };
 
 SPA_EXPORT
-int pipewire__module_init(struct pw_module *module, const char *args)
+int pipewire__module_init(struct pw_impl_module *module, const char *args)
 {
 	struct pw_properties *props = NULL;
 	char **argv = NULL;
 	int n_tokens, res;
-	struct pw_core *core = pw_module_get_core(module);
-	struct pw_node *node;
+	struct pw_context *context = pw_impl_module_get_context(module);
+	struct pw_impl_node *node;
         struct node_data *data;
 
 	if (args == NULL)
@@ -93,7 +89,7 @@ int pipewire__module_init(struct pw_module *module, const char *args)
 		}
 	}
 
-	node = pw_spa_node_load(core,
+	node = pw_spa_node_load(context,
 				argv[0],
 				PW_SPA_NODE_FLAG_ACTIVATE,
 				props,
@@ -108,13 +104,13 @@ int pipewire__module_init(struct pw_module *module, const char *args)
 
 	data = pw_spa_node_get_user_data(node);
 	data->this = node;
-	data->core = core;
+	data->context = context;
 	data->properties = props;
 
 	pw_log_debug("module %p: new", module);
-	pw_module_add_listener(module, &data->module_listener, &module_events, data);
+	pw_impl_module_add_listener(module, &data->module_listener, &module_events, data);
 
-	pw_module_update_properties(module, &SPA_DICT_INIT_ARRAY(module_props));
+	pw_impl_module_update_properties(module, &SPA_DICT_INIT_ARRAY(module_props));
 
 	return 0;
 

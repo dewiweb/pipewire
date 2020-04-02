@@ -41,6 +41,7 @@
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
 #include <spa/node/io.h>
+#include <spa/node/keys.h>
 #include <spa/param/param.h>
 #include <spa/param/audio/format.h>
 #include <spa/param/audio/format-utils.h>
@@ -111,7 +112,7 @@ struct impl {
 	struct port port;
 
 	unsigned int started:1;
-	unsigned int slaved:1;
+	unsigned int following:1;
 
 	struct spa_source source;
 	int timerfd;
@@ -245,7 +246,7 @@ static int set_timers(struct impl *this)
 	int res;
 
 	ts.it_value.tv_sec = 0;
-	if (this->slaved) {
+	if (this->following) {
 		ts.it_value.tv_nsec = 0;
 	} else {
 		ts.it_value.tv_nsec = 1;
@@ -259,7 +260,7 @@ static int set_timers(struct impl *this)
 	return res;
 }
 
-static int do_reslave(struct spa_loop *loop,
+static int do_reassign_follower(struct spa_loop *loop,
 			bool async,
 			uint32_t seq,
 			const void *data,
@@ -271,7 +272,7 @@ static int do_reslave(struct spa_loop *loop,
 	return 0;
 }
 
-static inline bool is_slaved(struct impl *this)
+static inline bool is_following(struct impl *this)
 {
 	return this->position && this->clock && this->position->clock.id != this->clock->id;
 }
@@ -279,7 +280,7 @@ static inline bool is_slaved(struct impl *this)
 static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 {
 	struct impl *this = object;
-	bool slaved;
+	bool following;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
@@ -294,11 +295,11 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 		return -ENOENT;
 	}
 
-	slaved = is_slaved(this);
-	if (this->started && slaved != this->slaved) {
-		spa_log_debug(this->log, NAME " %p: reslave %d->%d", this, this->slaved, slaved);
-		this->slaved = slaved;
-		spa_loop_invoke(this->data_loop, do_reslave, 0, NULL, 0, true, this);
+	following = is_following(this);
+	if (this->started && following != this->following) {
+		spa_log_debug(this->log, NAME " %p: reassign follower %d->%d", this, this->following, following);
+		this->following = following;
+		spa_loop_invoke(this->data_loop, do_reassign_follower, 0, NULL, 0, true, this);
 	}
 	return 0;
 }
@@ -359,6 +360,8 @@ static int send_buffer(struct impl *this)
 	int val, written;
 	struct rtp_header *header;
 	struct rtp_payload *payload;
+
+	spa_return_val_if_fail(this->transport, -EIO);
 
 	header = (struct rtp_header *)this->buffer;
 	payload = (struct rtp_payload *)(this->buffer + sizeof(struct rtp_header));
@@ -472,10 +475,8 @@ static int add_data(struct impl *this, const void *data, int size)
 	while (size > 0) {
 		processed = encode_buffer(this, data, size);
 
-		if (processed == -ENOSPC || processed == 0)
-			break;
-		if (processed < 0)
-			return 0;
+		if (processed <= 0)
+			return total > 0 ? total : processed;
 
 		data = SPA_MEMBER(data, processed, void);
 		size -= processed;
@@ -487,6 +488,8 @@ static int add_data(struct impl *this, const void *data, int size)
 static int set_bitpool(struct impl *this, int bitpool)
 {
 	struct port *port = &this->port;
+
+	spa_return_val_if_fail(this->transport, -EIO);
 
 	if (bitpool < this->min_bitpool)
 		bitpool = this->min_bitpool;
@@ -556,21 +559,25 @@ static int flush_data(struct impl *this, uint64_t now_time)
 		l0 = SPA_MIN(n_bytes, d[0].maxsize - offs);
 		l1 = n_bytes - l0;
 
-		n_bytes = add_data(this, src + offs, l0);
-		if (n_bytes > 0 && l1 > 0)
-			n_bytes += add_data(this, src, l1);
-		if (n_bytes <= 0) {
+		written = add_data(this, src + offs, l0);
+		if (written > 0 && l1 > 0)
+			written += add_data(this, src, l1);
+		if (written <= 0) {
 			port->need_data = true;
-			spa_list_remove(&b->link);
-			b->outstanding = true;
-			spa_node_call_reuse_buffer(&this->callbacks, 0, b->id);
-			port->ready_offset = 0;
+			if (written < 0 && written != -ENOSPC) {
+				spa_list_remove(&b->link);
+				b->outstanding = true;
+				spa_log_trace(this->log, NAME " %p: error %s, reuse buffer %u",
+						this, spa_strerror(written), b->id);
+				spa_node_call_reuse_buffer(&this->callbacks, 0, b->id);
+				port->ready_offset = 0;
+			}
 			break;
 		}
 
-		n_frames = n_bytes / port->frame_size;
+		n_frames = written / port->frame_size;
 
-		port->ready_offset += n_bytes;
+		port->ready_offset += written;
 
 		if (port->ready_offset >= d[0].chunk->size) {
 			spa_list_remove(&b->link);
@@ -623,7 +630,7 @@ static int flush_data(struct impl *this, uint64_t now_time)
 	spa_log_trace(this->log, NAME" %p: %"PRIu64" %"PRIi64" %"PRIu64" %"PRIu64" %d", this,
 			now_time, queued, this->sample_time, elapsed, this->write_samples);
 
-	if (!this->slaved) {
+	if (!this->following) {
 		if (queued < FILL_FRAMES * this->write_samples) {
 			queued = (FILL_FRAMES + 1) * this->write_samples;
 			if (this->sample_time < elapsed) {
@@ -712,7 +719,11 @@ static void a2dp_on_timeout(struct spa_source *source)
 static int init_sbc(struct impl *this)
 {
         struct spa_bt_transport *transport = this->transport;
-	a2dp_sbc_t *conf = transport->configuration;
+	a2dp_sbc_t *conf;
+
+	spa_return_val_if_fail(transport, -EIO);
+
+	conf = transport->configuration;
 
 	sbc_init(&this->sbc, 0);
 	this->sbc.endian = SBC_LE;
@@ -794,9 +805,11 @@ static int do_start(struct impl *this)
 	if (this->started)
 		return 0;
 
-	this->slaved = is_slaved(this);
+	spa_return_val_if_fail(this->transport, -EIO);
 
-        spa_log_debug(this->log, NAME " %p: start slaved:%d", this, this->slaved);
+	this->following = is_following(this);
+
+        spa_log_debug(this->log, NAME " %p: start following:%d", this, this->following);
 
 	if ((res = spa_bt_transport_acquire(this->transport, false)) < 0)
 		return res;
@@ -908,6 +921,7 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 		if ((res = do_start(this)) < 0)
 			return res;
 		break;
+	case SPA_NODE_COMMAND_Suspend:
 	case SPA_NODE_COMMAND_Pause:
 		if ((res = do_stop(this)) < 0)
 			return res;
@@ -1035,18 +1049,23 @@ impl_node_port_enum_params(void *object, int seq,
 	case SPA_PARAM_EnumFormat:
 		if (result.index > 0)
 			return 0;
+		if (this->transport == NULL)
+			return -EIO;
 
 		switch (this->transport->codec) {
 		case A2DP_CODEC_SBC:
 		{
 			a2dp_sbc_t *config = this->transport->configuration;
 			struct spa_audio_info_raw info = { 0, };
+			int res;
 
 			info.format = SPA_AUDIO_FORMAT_S16;
-			if ((info.rate = a2dp_sbc_get_frequency(config)) < 0)
+			if ((res = a2dp_sbc_get_frequency(config)) < 0)
 				return -EIO;
-			if ((info.channels = a2dp_sbc_get_channels(config)) < 0)
+			info.rate = res;
+			if ((res = a2dp_sbc_get_channels(config)) < 0)
 				return -EIO;
+			info.channels = res;
 
 			switch (info.channels) {
 			case 1:
@@ -1358,7 +1377,7 @@ static const struct spa_bt_transport_events transport_events = {
         .destroy = transport_destroy,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
 
@@ -1367,7 +1386,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct impl *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Node)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -1398,7 +1417,7 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	struct port *port;
-	uint32_t i;
+	const char *str;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -1408,19 +1427,10 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct impl *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataLoop:
-			this->data_loop = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataSystem:
-			this->data_system = support[i].data;
-			break;
-		}
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
+	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
+
 	if (this->data_loop == NULL) {
 		spa_log_error(this->log, "a data loop is needed");
 		return -EINVAL;
@@ -1464,10 +1474,9 @@ impl_init(const struct spa_handle_factory *factory,
 	port->info.n_params = 5;
 	spa_list_init(&port->ready);
 
-	for (i = 0; info && i < info->n_items; i++) {
-		if (strcmp(info->items[i].key, SPA_KEY_API_BLUEZ5_TRANSPORT) == 0)
-			sscanf(info->items[i].value, "pointer:%p", &this->transport);
-	}
+	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_BLUEZ5_TRANSPORT)))
+		sscanf(str, "pointer:%p", &this->transport);
+
 	if (this->transport == NULL) {
 		spa_log_error(this->log, "a transport is needed");
 		return -EINVAL;

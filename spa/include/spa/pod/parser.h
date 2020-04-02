@@ -333,7 +333,7 @@ static inline bool spa_pod_parser_can_collect(const struct spa_pod *pod, char ty
 do {											\
 	switch (_type) {								\
 	case 'b':									\
-		*va_arg(args, int*) = SPA_POD_VALUE(struct spa_pod_bool, pod);		\
+		*va_arg(args, bool*) = SPA_POD_VALUE(struct spa_pod_bool, pod);		\
 		break;									\
 	case 'I':									\
 	case 'i':									\
@@ -445,7 +445,7 @@ do {											\
 static inline int spa_pod_parser_getv(struct spa_pod_parser *parser, va_list args)
 {
 	struct spa_pod_frame *f = parser->state.frame;
-        uint32_t ftype = f ? f->pod.type : SPA_TYPE_Struct;
+        uint32_t ftype = f ? f->pod.type : (uint32_t)SPA_TYPE_Struct;
 	const struct spa_pod_prop *prop = NULL;
 	int count = 0;
 
@@ -484,7 +484,8 @@ static inline int spa_pod_parser_getv(struct spa_pod_parser *parser, va_list arg
 			}
 			SPA_POD_PARSER_SKIP(*format, args);
 		} else {
-			if (pod->type == SPA_TYPE_Choice && *format != 'V')
+			if (pod->type == SPA_TYPE_Choice && *format != 'V' &&
+			    SPA_POD_CHOICE_TYPE(pod) == SPA_CHOICE_None)
 				pod = SPA_POD_CHOICE_CHILD(pod);
 
 			SPA_POD_PARSER_COLLECT(pod, *format, args);

@@ -29,6 +29,7 @@
 
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
+#include <spa/node/keys.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
 #include <spa/utils/list.h>
@@ -148,7 +149,7 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	default:
 		return -ENOENT;
 	}
-	spa_alsa_seq_reslave(this);
+	spa_alsa_seq_reassign_follower(this);
 	return 0;
 }
 
@@ -194,6 +195,7 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 			return res;
 		break;
 	case SPA_NODE_COMMAND_Pause:
+	case SPA_NODE_COMMAND_Suspend:
 		if ((res = spa_alsa_seq_pause(this)) < 0)
 			return res;
 		break;
@@ -348,7 +350,7 @@ static struct seq_port *find_port(struct seq_state *state,
 		struct seq_stream *stream, const snd_seq_addr_t *addr)
 {
 	uint32_t i;
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < stream->last_port; i++) {
 		struct seq_port *port = &stream->ports[i];
 		if (port->valid &&
 		    port->addr.client == addr->client &&
@@ -367,23 +369,30 @@ static struct seq_port *alloc_port(struct seq_state *state, struct seq_stream *s
 			port->id = i;
 			port->direction = stream->direction;
 			port->valid = true;
+			if (stream->last_port < i + 1)
+				stream->last_port = i + 1;
 			return port;
 		}
 	}
 	return NULL;
 }
-static void free_port(struct seq_state *state, struct seq_port *port)
+
+static void free_port(struct seq_state *state, struct seq_stream *stream, struct seq_port *port)
 {
+	if (port->id + 1 == stream->last_port) {
+		int i;
+		for (i = stream->last_port - 1; i >= 0; i--)
+			if (!stream->ports[i].valid)
+				break;
+		stream->last_port = i + 1;
+	}
 	spa_node_emit_port_info(&state->hooks,
 			port->direction, port->id, NULL);
-	port->valid = false;
+	spa_zero(*port);
 }
 
 static void init_port(struct seq_state *state, struct seq_port *port, const snd_seq_addr_t *addr)
 {
-	snd_seq_port_subscribe_t* sub;
-	int res;
-
 	port->addr = *addr;
 	port->info_all = SPA_PORT_CHANGE_MASK_FLAGS |
 			SPA_PORT_CHANGE_MASK_PROPS |
@@ -404,23 +413,7 @@ static void init_port(struct seq_state *state, struct seq_port *port, const snd_
 	spa_list_init(&port->free);
 	spa_list_init(&port->ready);
 
-	snd_seq_port_subscribe_alloca(&sub);
-	if (port->direction == SPA_DIRECTION_OUTPUT) {
-		snd_seq_port_subscribe_set_sender(sub, addr);
-		snd_seq_port_subscribe_set_dest(sub, &state->event.addr);
-	} else {
-		snd_seq_port_subscribe_set_sender(sub, &state->event.addr);
-		snd_seq_port_subscribe_set_dest(sub, addr);
-	}
-	snd_seq_port_subscribe_set_time_update(sub, 1);
-	snd_seq_port_subscribe_set_time_real(sub, 1);
-	snd_seq_port_subscribe_set_queue(sub, state->event.queue_id);
-
-	if ((res = snd_seq_subscribe_port(state->event.hndl, sub)) < 0) {
-                spa_log_error(state->log, "can't subscribe to %d:%d - %s",
-				addr->client, addr->port, snd_strerror(res));
-	}
-	spa_log_debug(state->log, "connect: %d.%d: %d", addr->client, addr->port, res);
+	spa_alsa_seq_activate_port(state, port, true);
 
 	emit_port_info(state, port, true);
 }
@@ -433,7 +426,7 @@ static void update_stream_port(struct seq_state *state, struct seq_stream *strea
 	if (info == NULL) {
 		spa_log_debug(state->log, "free port %d.%d", addr->client, addr->port);
 		if (port)
-			free_port(state, port);
+			free_port(state, stream, port);
 	} else {
 		if (port == NULL && (caps & stream->caps) == stream->caps) {
 			spa_log_debug(state->log, "new port %d.%d", addr->client, addr->port);
@@ -444,7 +437,7 @@ static void update_stream_port(struct seq_state *state, struct seq_stream *strea
 		} else if (port != NULL) {
 			if ((caps & stream->caps) != stream->caps) {
 				spa_log_debug(state->log, "free port %d.%d", addr->client, addr->port);
-				free_port(state, port);
+				free_port(state, stream, port);
 			}
 			else {
 				spa_log_debug(state->log, "update port %d.%d", addr->client, addr->port);
@@ -795,7 +788,7 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct seq_state *this;
 
@@ -804,7 +797,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct seq_state *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Node)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -814,6 +807,13 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 static int impl_clear(struct spa_handle *handle)
 {
+	struct seq_state *this;
+
+	spa_return_val_if_fail(handle != NULL, -EINVAL);
+
+	this = (struct seq_state *) handle;
+
+	spa_alsa_seq_close(this);
 	return 0;
 }
 
@@ -843,22 +843,11 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct seq_state *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataSystem:
-			this->data_system = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataLoop:
-			this->data_loop = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_Loop:
-			this->main_loop = support[i].data;
-			break;
-		}
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
+	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
+	this->main_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
+
 	if (this->data_loop == NULL) {
 		spa_log_error(this->log, "a data loop is needed");
 		return -EINVAL;

@@ -101,8 +101,8 @@ open_plugin(struct registry *registry,
 	spa_handle_factory_enum_func_t enum_func;
 	int res;
 
-        if (asprintf(&filename, "%s/%s.so", path, lib) < 0) {
-		res = -ENOMEM;
+        if ((filename = spa_aprintf("%s/%s.so", path, lib)) == NULL) {
+		res = -errno;
 		goto error_out;
 	}
 
@@ -314,7 +314,7 @@ int pw_unload_spa_handle(struct spa_handle *handle)
 
 static void *add_interface(struct support *support,
 		const char *factory_name,
-		uint32_t type,
+		const char *type,
 		const struct spa_dict *info)
 {
 	struct spa_handle *handle;
@@ -327,7 +327,7 @@ static void *add_interface(struct support *support,
 
 	if (handle == NULL ||
 	    (res = spa_handle_get_interface(handle, type, &iface)) < 0) {
-			pw_log_error("can't get %d interface %d", type, res);
+			pw_log_error("can't get %s interface %d", type, res);
 	} else {
 		support->support[support->n_support++] =
 			SPA_SUPPORT_INIT(type, iface);
@@ -378,8 +378,8 @@ void pw_init(int *argc, char **argv[])
 	support->registry = &global_registry;
 
 	n_items = 0;
-	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_COLORS, "1");
-	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_TIMESTAMP, "1");
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_COLORS, "true");
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_TIMESTAMP, "true");
 	snprintf(level, sizeof(level), "%d", pw_log_level);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_LEVEL, level);
 	if ((str = getenv("PIPEWIRE_LOG")) != NULL)
@@ -496,63 +496,6 @@ const char *pw_get_client_name(void)
 	}
 }
 
-/** Fill remote properties
- * \param properties a \ref pw_properties
- *
- * Fill \a properties with a set of default remote properties.
- *
- * \memberof pw_pipewire
- */
-SPA_EXPORT
-void pw_fill_remote_properties(struct pw_core *core, struct pw_properties *properties)
-{
-	const char *val;
-
-	if (!pw_properties_get(properties, PW_KEY_APP_NAME))
-		pw_properties_set(properties, PW_KEY_APP_NAME, pw_get_client_name());
-
-	if (!pw_properties_get(properties, PW_KEY_APP_PROCESS_BINARY))
-		pw_properties_set(properties, PW_KEY_APP_PROCESS_BINARY, pw_get_prgname());
-
-	if (!pw_properties_get(properties, PW_KEY_APP_LANGUAGE)) {
-		pw_properties_set(properties, PW_KEY_APP_LANGUAGE, getenv("LANG"));
-	}
-	if (!pw_properties_get(properties, PW_KEY_APP_PROCESS_ID)) {
-		pw_properties_setf(properties, PW_KEY_APP_PROCESS_ID, "%zd", (size_t) getpid());
-	}
-	if (!pw_properties_get(properties, PW_KEY_APP_PROCESS_USER))
-		pw_properties_set(properties, PW_KEY_APP_PROCESS_USER, pw_get_user_name());
-
-	if (!pw_properties_get(properties, PW_KEY_APP_PROCESS_HOST))
-		pw_properties_set(properties, PW_KEY_APP_PROCESS_HOST, pw_get_host_name());
-
-	if (!pw_properties_get(properties, PW_KEY_APP_PROCESS_SESSION_ID)) {
-		pw_properties_set(properties, PW_KEY_APP_PROCESS_SESSION_ID,
-				  getenv("XDG_SESSION_ID"));
-	}
-	if (!pw_properties_get(properties, PW_KEY_WINDOW_X11_DISPLAY)) {
-		pw_properties_set(properties, PW_KEY_WINDOW_X11_DISPLAY,
-				  getenv("DISPLAY"));
-	}
-	pw_properties_set(properties, PW_KEY_CORE_VERSION, core->info.version);
-	pw_properties_set(properties, PW_KEY_CORE_NAME, core->info.name);
-
-	if ((val = pw_properties_get(core->properties, PW_KEY_CORE_DAEMON)))
-		pw_properties_set(properties, PW_KEY_CORE_DAEMON, val);
-}
-
-/** Fill stream properties
- * \param properties a \ref pw_properties
- *
- * Fill \a properties with a set of default stream properties.
- *
- * \memberof pw_pipewire
- */
-SPA_EXPORT
-void pw_fill_stream_properties(struct pw_core *core, struct pw_properties *properties)
-{
-}
-
 /** Reverse the direction \memberof pw_pipewire */
 SPA_EXPORT
 enum pw_direction pw_direction_reverse(enum pw_direction direction)
@@ -572,28 +515,6 @@ const char* pw_get_library_version(void)
 }
 
 static const struct spa_type_info type_info[] = {
-	{ PW_TYPE_INTERFACE_Core, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "Core", NULL },
-	{ PW_TYPE_INTERFACE_Registry, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "Registry", NULL },
-	{ PW_TYPE_INTERFACE_Node, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "Node", NULL },
-	{ PW_TYPE_INTERFACE_Port, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "Port", NULL },
-	{ PW_TYPE_INTERFACE_Factory, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "Factory", NULL },
-	{ PW_TYPE_INTERFACE_Link, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "Link", NULL },
-	{ PW_TYPE_INTERFACE_Client, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "Client", NULL },
-	{ PW_TYPE_INTERFACE_Module, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "Module", NULL },
-	{ PW_TYPE_INTERFACE_Device, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "Device", NULL },
-
-	/* extensions */
-	{ PW_TYPE_INTERFACE_Metadata, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "Metadata", NULL },
-	{ PW_TYPE_INTERFACE_Session, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "Session", NULL},
-	{ PW_TYPE_INTERFACE_Endpoint, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "Endpoint", NULL},
-	{ PW_TYPE_INTERFACE_EndpointStream, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "EndpointStream", NULL},
-	{ PW_TYPE_INTERFACE_EndpointLink, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "EndpointLink", NULL},
-
-	/* implementations */
-	{ PW_TYPE_INTERFACE_ClientNode, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "ClientNode", NULL },
-	{ PW_TYPE_INTERFACE_ClientSession, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "ClientSession", NULL},
-	{ PW_TYPE_INTERFACE_ClientEndpoint, SPA_TYPE_Pointer, PW_TYPE_INFO_INTERFACE_BASE "ClientEndpoint", NULL},
-
 	{ SPA_ID_INVALID, SPA_ID_INVALID, "spa_types", spa_types },
 	{ 0, 0, NULL, NULL },
 };

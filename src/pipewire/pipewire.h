@@ -31,26 +31,31 @@ extern "C" {
 
 #include <spa/support/plugin.h>
 
+#include <pipewire/array.h>
 #include <pipewire/client.h>
-#include <pipewire/core.h>
+#include <pipewire/context.h>
 #include <pipewire/device.h>
-#include <pipewire/interfaces.h>
-#include <pipewire/introspect.h>
+#include <pipewire/buffers.h>
+#include <pipewire/core.h>
+#include <pipewire/factory.h>
 #include <pipewire/keys.h>
-#include <pipewire/link.h>
 #include <pipewire/log.h>
 #include <pipewire/loop.h>
+#include <pipewire/link.h>
 #include <pipewire/main-loop.h>
+#include <pipewire/map.h>
+#include <pipewire/mem.h>
 #include <pipewire/module.h>
-#include <pipewire/factory.h>
 #include <pipewire/node.h>
-#include <pipewire/port.h>
 #include <pipewire/properties.h>
 #include <pipewire/proxy.h>
-#include <pipewire/remote.h>
-#include <pipewire/resource.h>
+#include <pipewire/permission.h>
+#include <pipewire/protocol.h>
+#include <pipewire/port.h>
 #include <pipewire/stream.h>
+#include <pipewire/filter.h>
 #include <pipewire/thread-loop.h>
+#include <pipewire/data-loop.h>
 #include <pipewire/type.h>
 #include <pipewire/utils.h>
 #include <pipewire/version.h>
@@ -62,15 +67,16 @@ extern "C" {
  * This document describes the API for the PipeWire multimedia framework.
  * The API consists of two parts:
  *
- * \li The core API and tools to build new modules (See
- * \subpage page_core_api)
- * \li The remote API (See \subpage page_remote_api)
+ * \li The core API to access a PipeWire instance.
+ * (See \subpage page_core_api)
+ * \li The implementation API and tools to build new objects and
+ * modules (See \subpage page_implementation_api)
  *
  * \section sec_errors Error reporting
  *
- * Functions return either NULL or a negative int error code when an
- * error occurs. Error codes are used from the SPA plugin library on
- * which PipeWire is built.
+ * Functions return either NULL with errno set or a negative int error
+ * code when an error occurs. Error codes are used from the SPA plugin
+ * library on which PipeWire is built.
  *
  * Some functions might return asynchronously. The error code for such
  * functions is positive and SPA_RESULT_IS_ASYNC() will return true.
@@ -127,12 +133,6 @@ pw_get_host_name(void);
 
 const char *
 pw_get_client_name(void);
-
-void
-pw_fill_remote_properties(struct pw_core *core, struct pw_properties *properties);
-
-void
-pw_fill_stream_properties(struct pw_core *core, struct pw_properties *properties);
 
 enum pw_direction
 pw_direction_reverse(enum pw_direction direction);

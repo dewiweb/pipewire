@@ -37,8 +37,8 @@ struct impl {
 };
 
 struct pw_control *
-pw_control_new(struct pw_core *core,
-	       struct pw_port *port,
+pw_control_new(struct pw_context *context,
+	       struct pw_impl_port *port,
 	       uint32_t id, uint32_t size,
 	       size_t user_data_size)
 {
@@ -69,7 +69,7 @@ pw_control_new(struct pw_core *core,
 	pw_log_debug(NAME" %p: new %s %d", this,
 			spa_debug_type_find_name(spa_type_io, this->id), direction);
 
-	this->core = core;
+	this->context = context;
 	this->port = port;
 	this->direction = direction;
 
@@ -80,10 +80,10 @@ pw_control_new(struct pw_core *core,
 
 	spa_hook_list_init(&this->listener_list);
 
-	spa_list_append(&core->control_list[direction], &this->link);
+	spa_list_append(&context->control_list[direction], &this->link);
 	if (port) {
 		spa_list_append(&port->control_list[direction], &this->port_link);
-		pw_port_emit_control_added(port, this);
+		pw_impl_port_emit_control_added(port, this);
 	}
 	return this;
 
@@ -113,7 +113,7 @@ void pw_control_destroy(struct pw_control *control)
 
 	if (control->port) {
 		spa_list_remove(&control->port_link);
-		pw_port_emit_control_removed(control->port, control);
+		pw_impl_port_emit_control_removed(control->port, control);
 	}
 
 	pw_log_debug(NAME" %p: free", control);
@@ -127,7 +127,7 @@ void pw_control_destroy(struct pw_control *control)
 }
 
 SPA_EXPORT
-struct pw_port *pw_control_get_port(struct pw_control *control)
+struct pw_impl_port *pw_control_get_port(struct pw_control *control)
 {
 	return control->port;
 }
@@ -141,7 +141,7 @@ void pw_control_add_listener(struct pw_control *control,
 	spa_hook_list_append(&control->listener_list, listener, events, data);
 }
 
-static int port_set_io(struct pw_port *port, uint32_t mix, uint32_t id, void *data, uint32_t size)
+static int port_set_io(struct pw_impl_port *port, uint32_t mix, uint32_t id, void *data, uint32_t size)
 {
 	int res;
 
@@ -185,7 +185,7 @@ int pw_control_add_link(struct pw_control *control, uint32_t cmix,
 	size = SPA_MAX(control->size, other->size);
 
 	if (impl->mem == NULL) {
-		impl->mem = pw_mempool_alloc(control->core->pool,
+		impl->mem = pw_mempool_alloc(control->context->pool,
 						PW_MEMBLOCK_FLAG_READWRITE |
 						PW_MEMBLOCK_FLAG_SEAL |
 						PW_MEMBLOCK_FLAG_MAP,

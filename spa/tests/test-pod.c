@@ -35,6 +35,7 @@
 static void test_abi(void)
 {
 	/* pod */
+#if defined(__x86_64__)
 	spa_assert(sizeof(struct spa_pod) == 8);
 	spa_assert(sizeof(struct spa_pod_bool) == 16);
 	spa_assert(sizeof(struct spa_pod_id) == 16);
@@ -85,6 +86,7 @@ static void test_abi(void)
 	/* parser */
 	spa_assert(sizeof(struct spa_pod_parser_state) == 16);
 	spa_assert(sizeof(struct spa_pod_parser) == 32);
+#endif
 
 }
 
@@ -879,7 +881,7 @@ static void test_varargs2(void)
 		1,	SPA_POD_Bool(true),
 		2,	SPA_POD_Id(SPA_TYPE_Id),
 		3,	SPA_POD_Int(3),
-		4,	SPA_POD_Long(4),
+		4,	SPA_POD_Long(4LL),
 		5,	SPA_POD_Float(0.453f),
 		6,	SPA_POD_Double(0.871),
 		7,	SPA_POD_String("test"),
@@ -966,7 +968,8 @@ static void test_varargs2(void)
 			break;
 		case 11:
 			spa_assert(prop->key == 12);
-			spa_assert(SPA_POD_PROP_SIZE(prop) == 32);
+			spa_assert(SPA_POD_PROP_SIZE(prop) == (sizeof(struct spa_pod_prop) +
+					sizeof(struct spa_pod_pointer_body)));
 			spa_assert(spa_pod_get_pointer(&prop->value, &val.ptype, &val.p) == 0);
 			spa_assert(val.ptype == SPA_TYPE_Object);
 			spa_assert(val.p == &b);
@@ -1104,7 +1107,7 @@ static void test_parser(void)
 		1,	SPA_POD_Bool(true),
 		2,	SPA_POD_Id(SPA_TYPE_Id),
 		3,	SPA_POD_Int(3),
-		4,	SPA_POD_Long(4),
+		4,	SPA_POD_Long(4LL),
 		5,	SPA_POD_Float(0.453f),
 		6,	SPA_POD_Double(0.871),
 		7,	SPA_POD_String("test"),
@@ -1234,7 +1237,7 @@ static void test_parser2(void)
 		SPA_POD_Bool(true),
 		SPA_POD_Id(SPA_TYPE_Id),
 		SPA_POD_Int(3),
-		SPA_POD_Long(4),
+		SPA_POD_Long(4LL),
 		SPA_POD_Float(0.453f),
 		SPA_POD_Double(0.871),
 		SPA_POD_String("test"),

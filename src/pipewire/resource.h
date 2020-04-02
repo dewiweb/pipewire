@@ -35,7 +35,7 @@ extern "C" {
  *
  * \section sec_page_resource Overview
  *
- * Resources represent objects owned by a \ref pw_client. They are
+ * Resources represent objects owned by a \ref pw_impl_client. They are
  * the result of binding to a global resource or by calling API that
  * creates client owned objects.
  *
@@ -58,7 +58,7 @@ extern "C" {
  */
 struct pw_resource;
 
-#include <pipewire/client.h>
+#include <pipewire/impl-client.h>
 
 /** Resource events */
 struct pw_resource_events {
@@ -77,18 +77,22 @@ struct pw_resource_events {
 
 /** Make a new resource for client */
 struct pw_resource *
-pw_resource_new(struct pw_client *client,	/**< the client owning the resource */
+pw_resource_new(struct pw_impl_client *client,	/**< the client owning the resource */
 		uint32_t id,			/**< the remote per client id */
 		uint32_t permissions,		/**< permissions on this resource */
-		uint32_t type,			/**< interface of the resource */
+		const char *type,		/**< interface of the resource */
 		uint32_t version,		/**< requested interface version */
 		size_t user_data_size		/**< extra user data size */);
 
 /** Destroy a resource */
 void pw_resource_destroy(struct pw_resource *resource);
 
+/** Remove a resource, like pw_resource_destroy but without sending a
+ * remove_id message to the client */
+void pw_resource_remove(struct pw_resource *resource);
+
 /** Get the client owning this resource */
-struct pw_client *pw_resource_get_client(struct pw_resource *resource);
+struct pw_impl_client *pw_resource_get_client(struct pw_resource *resource);
 
 /** Get the unique id of this resource */
 uint32_t pw_resource_get_id(struct pw_resource *resource);
@@ -96,8 +100,8 @@ uint32_t pw_resource_get_id(struct pw_resource *resource);
 /** Get the permissions of this resource */
 uint32_t pw_resource_get_permissions(struct pw_resource *resource);
 
-/** Get the type of this resource */
-uint32_t pw_resource_get_type(struct pw_resource *resource);
+/** Get the type and optionally the version of this resource */
+const char *pw_resource_get_type(struct pw_resource *resource, uint32_t *version);
 
 /** Get the protocol used for this resource */
 struct pw_protocol *pw_resource_get_protocol(struct pw_resource *resource);
@@ -121,14 +125,25 @@ void pw_resource_add_object_listener(struct pw_resource *resource,
  * with the same \a sequence number in the return value. */
 int pw_resource_ping(struct pw_resource *resource, int seq);
 
+/** Notify global id this resource is bound to */
+int pw_resource_set_bound_id(struct pw_resource *resource, uint32_t global_id);
+
+/** Get the global id this resource is bound to or SPA_ID_INVALID when not bound */
+uint32_t pw_resource_get_bound_id(struct pw_resource *resource);
+
 /** Generate an error for a resource */
-void pw_resource_error(struct pw_resource *resource, int res, const char *error, ...);
+void pw_resource_error(struct pw_resource *resource, int res, const char *error);
+void pw_resource_errorf(struct pw_resource *resource, int res, const char *error, ...) SPA_PRINTF_FUNC(3, 4);
+void pw_resource_errorf_id(struct pw_resource *resource, uint32_t id, int res, const char *error, ...) SPA_PRINTF_FUNC(4, 5);
 
 /** Get the list of object listeners from a resource */
 struct spa_hook_list *pw_resource_get_object_listeners(struct pw_resource *resource);
 
 /** Get the marshal functions for the resource */
 const struct pw_protocol_marshal *pw_resource_get_marshal(struct pw_resource *resource);
+
+/** install a marshal function on a resource */
+int pw_resource_install_marshal(struct pw_resource *resource, bool implementor);
 
 #define pw_resource_notify(r,type,event,version,...)			\
 	spa_hook_list_call(pw_resource_get_object_listeners(r),		\

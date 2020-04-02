@@ -50,11 +50,27 @@ static inline const struct spa_type_info *spa_debug_type_find(const struct spa_t
 	return NULL;
 }
 
+static inline const char *spa_debug_type_short_name(const char *name)
+{
+	const char *h;
+	if ((h = rindex(name, ':')) != NULL)
+		name = h + 1;
+	return name;
+}
+
 static inline const char *spa_debug_type_find_name(const struct spa_type_info *info, uint32_t type)
 {
 	if ((info = spa_debug_type_find(info, type)) == NULL)
 		return NULL;
 	return info->name;
+}
+
+static inline const char *spa_debug_type_find_short_name(const struct spa_type_info *info, uint32_t type)
+{
+	const char *str;
+	if ((str = spa_debug_type_find_name(info, type)) == NULL)
+		return NULL;
+	return spa_debug_type_short_name(str);
 }
 
 static inline uint32_t spa_debug_type_find_type(const struct spa_type_info *info, const char *name)

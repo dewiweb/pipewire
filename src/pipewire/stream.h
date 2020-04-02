@@ -35,7 +35,8 @@ extern "C" {
  *
  * Media streams are used to exchange data with the PipeWire server. A
  * stream is a wrapper around a proxy for a \ref pw_client_node with
- * just one port.
+ * an adapter. This means the stream will automatically do conversion
+ * to the type required by the server.
  *
  * Streams can be used to:
  *
@@ -46,8 +47,8 @@ extern "C" {
  * choose a port for you.
  *
  * For more complicated nodes such as filters or ports with multiple
- * inputs and/or outputs you will need to create a pw_node yourself and
- * export it with \ref pw_remote_export.
+ * inputs and/or outputs you will need to use the pw_filter or make
+ * a pw_node yourself and export it with \ref pw_core_export.
  *
  * \section sec_create Create
  *
@@ -77,18 +78,15 @@ extern "C" {
  *
  * \section sec_format Format negotiation
  *
- * After connecting the stream, it will transition to the \ref
- * PW_STREAM_STATE_CONFIGURE state. In this state the format will be
- * negotiated by the PipeWire server.
+ * After connecting the stream, the server will want to configure some
+ * parameters on the stream. You will be notified of these changes
+ * with the param_changed event.
  *
- * Once the format has been selected, the format_changed event is
- * emited with the configured format as a parameter.
+ * When a format param change is emited, the client should now prepare
+ * itself to deal with the format and complete the negotiation procedure
+ * with a call to \ref pw_stream_update_params().
  *
- * The client should now prepare itself to deal with the format and
- * complete the negotiation procedure with a call to \ref
- * pw_stream_finish_format().
- *
- * As arguments to \ref pw_stream_finish_format() an array of spa_param
+ * As arguments to \ref pw_stream_update_params() an array of spa_param
  * structures must be given. They contain parameters such as buffer size,
  * number of buffers, required metadata and other parameters for the
  * media buffers.
@@ -147,25 +145,20 @@ extern "C" {
  * The stream object provides a convenient way to send and
  * receive data streams from/to PipeWire.
  *
- * See also \ref page_streams and \ref page_core_api
+ * See also \ref page_streams and \ref page_context_api
  */
 struct pw_stream;
 
 #include <spa/buffer/buffer.h>
 #include <spa/param/param.h>
 
-#include <pipewire/remote.h>
-
 /** \enum pw_stream_state The state of a stream \memberof pw_stream */
 enum pw_stream_state {
 	PW_STREAM_STATE_ERROR = -1,		/**< the strean is in error */
 	PW_STREAM_STATE_UNCONNECTED = 0,	/**< unconnected */
 	PW_STREAM_STATE_CONNECTING = 1,		/**< connection is in progress */
-	PW_STREAM_STATE_CONFIGURE = 2,		/**< stream is being configured */
-	PW_STREAM_STATE_READY = 3,		/**< stream is ready */
-	PW_STREAM_STATE_PAUSED = 4,		/**< paused, fully configured but not
-						  *  processing data yet */
-	PW_STREAM_STATE_STREAMING = 5		/**< streaming */
+	PW_STREAM_STATE_PAUSED = 2,		/**< paused */
+	PW_STREAM_STATE_STREAMING = 3		/**< streaming */
 };
 
 struct pw_buffer {
@@ -189,6 +182,22 @@ struct pw_stream_control {
 	uint32_t max_values;		/**< max values that can be set on this control */
 };
 
+/** A time structure \memberof pw_stream */
+struct pw_time {
+	int64_t now;			/**< the monotonic time */
+	struct spa_fraction rate;	/**< the rate of \a ticks and delay */
+	uint64_t ticks;			/**< the ticks at \a now. This is the current time that
+					  *  the remote end is reading/writing. */
+	int64_t delay;			/**< delay to device, add to ticks to get the time of the
+					  *  device. Positive for INPUT streams and
+					  *  negative for OUTPUT streams. */
+	uint64_t queued;		/**< data queued in the stream, this is the sum
+					  *  of the size fields in the pw_buffer that are
+					  *  currently queued */
+};
+
+#include <pipewire/pipewire.h>
+
 /** Events for a stream. These events are always called from the mainloop
  * unless explicitly documented otherwise. */
 struct pw_stream_events {
@@ -203,10 +212,10 @@ struct pw_stream_events {
 	/** Notify information about a control.  */
 	void (*control_info) (void *data, uint32_t id, const struct pw_stream_control *control);
 
-	/** when the format changed. The listener should call
-	 * pw_stream_finish_format() from within this callback or later to complete
-	 * the format negotiation and start the buffer negotiation. */
-	void (*format_changed) (void *data, const struct spa_pod *format);
+	/** when io changed on the stream. */
+	void (*io_changed) (void *data, uint32_t id, void *area, uint32_t size);
+	/** when a parameter changed */
+	void (*param_changed) (void *data, uint32_t id, const struct spa_pod *param);
 
         /** when a new buffer was created for this stream */
         void (*add_buffer) (void *data, struct pw_buffer *buffer);
@@ -252,7 +261,7 @@ enum pw_stream_flags {
 /** Create a new unconneced \ref pw_stream \memberof pw_stream
  * \return a newly allocated \ref pw_stream */
 struct pw_stream *
-pw_stream_new(struct pw_remote *remote,		/**< a \ref pw_remote */
+pw_stream_new(struct pw_core *core,		/**< a \ref pw_core */
 	      const char *name,			/**< a stream media name */
 	      struct pw_properties *props	/**< stream properties, ownership is taken */);
 
@@ -275,7 +284,7 @@ enum pw_stream_state pw_stream_get_state(struct pw_stream *stream, const char **
 
 const char *pw_stream_get_name(struct pw_stream *stream);
 
-struct pw_remote *pw_stream_get_remote(struct pw_stream *stream);
+struct pw_core *pw_stream_get_core(struct pw_stream *stream);
 
 const struct pw_properties *pw_stream_get_properties(struct pw_stream *stream);
 
@@ -289,9 +298,9 @@ int pw_stream_update_properties(struct pw_stream *stream, const struct spa_dict 
 int
 pw_stream_connect(struct pw_stream *stream,		/**< a \ref pw_stream */
 		  enum pw_direction direction,		/**< the stream direction */
-		  uint32_t target_id,			/**< the target node to connect to or
-							  *  SPA_ID_INVALID to let the manager
-							  *  select a node. */
+		  uint32_t target_id,			/**< the target object id to connect to or
+							  *  PW_ID_ANY to let the manager
+							  *  select a target. */
 		  enum pw_stream_flags flags,		/**< stream flags */
 		  const struct spa_pod **params,	/**< an array with params. The params
 							  *  should ideally contain supported
@@ -306,37 +315,27 @@ pw_stream_get_node_id(struct pw_stream *stream);
 /** Disconnect \a stream \memberof pw_stream */
 int pw_stream_disconnect(struct pw_stream *stream);
 
+/** Set the stream in error state */
+int pw_stream_set_error(struct pw_stream *stream,	/**< a \ref pw_stream */
+			int res,			/**< a result code */
+			const char *error, ...		/**< an error message */) SPA_PRINTF_FUNC(3, 4);
+
 /** Complete the negotiation process with result code \a res \memberof pw_stream
  *
  * This function should be called after notification of the format.
 
  * When \a res indicates success, \a params contain the parameters for the
  * allocation state.  */
-void
-pw_stream_finish_format(struct pw_stream *stream,	/**< a \ref pw_stream */
-			int res,			/**< a result code */
+int
+pw_stream_update_params(struct pw_stream *stream,	/**< a \ref pw_stream */
 			const struct spa_pod **params,	/**< an array of params. The params should
 							  *  ideally contain parameters for doing
 							  *  buffer allocation. */
 			uint32_t n_params		/**< number of elements in \a params */);
 
-
 /** Set control values */
 int pw_stream_set_control(struct pw_stream *stream, uint32_t id, uint32_t n_values, float *values, ...);
 
-/** A time structure \memberof pw_stream */
-struct pw_time {
-	int64_t now;			/**< the monotonic time */
-	struct spa_fraction rate;	/**< the rate of \a ticks and delay */
-	uint64_t ticks;			/**< the ticks at \a now. This is the current time that
-					  *  the remote end is reading/writing. */
-	int64_t delay;			/**< delay to device, add to ticks to get the time of the
-					  *  device. Positive for INPUT streams and
-					  *  negative for OUTPUT streams. */
-	uint64_t queued;		/**< data queued in the stream, this is the sum
-					  *  of the size fields in the pw_buffer that are
-					  *  currently queued */
-};
 /** Query the time on the stream \memberof pw_stream */
 int pw_stream_get_time(struct pw_stream *stream, struct pw_time *time);
 

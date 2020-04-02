@@ -34,7 +34,7 @@
 
 #include <spa/utils/result.h>
 
-#include <pipewire/pipewire.h>
+#include <pipewire/impl.h>
 
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
@@ -43,14 +43,14 @@ static const struct spa_dict_item module_props[] = {
 };
 
 struct impl {
-	struct pw_core *core;
+	struct pw_context *context;
 	struct pw_properties *properties;
 
-	struct spa_hook core_listener;
+	struct spa_hook context_listener;
 	struct spa_hook module_listener;
 };
 
-static int check_cmdline(struct pw_client *client, int pid, const char *str)
+static int check_cmdline(struct pw_impl_client *client, int pid, const char *str)
 {
 	char path[2048];
 	int fd;
@@ -75,7 +75,7 @@ static int check_cmdline(struct pw_client *client, int pid, const char *str)
 	return 0;
 }
 
-static int check_flatpak(struct pw_client *client, int pid)
+static int check_flatpak(struct pw_impl_client *client, int pid)
 {
 	char root_path[2048];
 	int root_fd, info_fd, res;
@@ -112,7 +112,7 @@ static int check_flatpak(struct pw_client *client, int pid)
 }
 
 static void
-core_check_access(void *data, struct pw_client *client)
+context_check_access(void *data, struct pw_impl_client *client)
 {
 	struct impl *impl = data;
 	struct pw_permission permissions[1];
@@ -122,16 +122,16 @@ core_check_access(void *data, struct pw_client *client)
 	int pid, res;
 
 	pid = -EINVAL;
-	if ((props = pw_client_get_properties(client)) != NULL) {
+	if ((props = pw_impl_client_get_properties(client)) != NULL) {
 		if ((str = pw_properties_get(props, PW_KEY_SEC_PID)) != NULL)
 			pid = atoi(str);
 	}
 
 	if (pid < 0) {
-		pw_log_info("no trusted pid found, assuming not sandboxed\n");
+		pw_log_info("client %p: no trusted pid found, assuming not sandboxed", client);
 		goto granted;
 	} else {
-		pw_log_info("client has trusted pid %d", pid);
+		pw_log_info("client %p has trusted pid %d", client, pid);
 	}
 
 	if (impl->properties && (str = pw_properties_get(impl->properties, "blacklisted")) != NULL) {
@@ -164,6 +164,8 @@ core_check_access(void *data, struct pw_client *client)
 		if (res < 0) {
 			pw_log_warn("module %p: client %p sandbox check failed: %s",
 				impl, client, spa_strerror(res));
+			if (res == -EACCES)
+				goto granted;
 		}
 		else if (res > 0) {
 			pw_log_debug("module %p: sandboxed client %p added", impl, client);
@@ -174,32 +176,32 @@ core_check_access(void *data, struct pw_client *client)
 
 granted:
 	pw_log_debug("module %p: client %p access granted", impl, client);
-	permissions[0] = PW_PERMISSION_INIT(-1, PW_PERM_RWX);
-	pw_client_update_permissions(client, 1, permissions);
+	permissions[0] = PW_PERMISSION_INIT(PW_ID_ANY, PW_PERM_RWX);
+	pw_impl_client_update_permissions(client, 1, permissions);
 	return;
 
 wait_permissions:
 	pw_log_debug("module %p: client %p wait for permissions", impl, client);
-	pw_client_update_properties(client, &SPA_DICT_INIT(items, 1));
-	pw_client_set_busy(client, true);
+	pw_impl_client_update_properties(client, &SPA_DICT_INIT(items, 1));
+	pw_impl_client_set_busy(client, true);
 	return;
 
 blacklisted:
-	pw_resource_error(pw_client_get_core_resource(client), res, "blacklisted");
-	pw_client_update_properties(client, &SPA_DICT_INIT(items, 1));
+	pw_resource_error(pw_impl_client_get_core_resource(client), res, "blacklisted");
+	pw_impl_client_update_properties(client, &SPA_DICT_INIT(items, 1));
 	return;
 }
 
-static const struct pw_core_events core_events = {
-	PW_VERSION_CORE_EVENTS,
-	.check_access = core_check_access,
+static const struct pw_context_events context_events = {
+	PW_VERSION_CONTEXT_EVENTS,
+	.check_access = context_check_access,
 };
 
 static void module_destroy(void *data)
 {
 	struct impl *impl = data;
 
-	spa_hook_remove(&impl->core_listener);
+	spa_hook_remove(&impl->context_listener);
 	spa_hook_remove(&impl->module_listener);
 
 	if (impl->properties)
@@ -208,15 +210,15 @@ static void module_destroy(void *data)
 	free(impl);
 }
 
-static const struct pw_module_events module_events = {
-	PW_VERSION_MODULE_EVENTS,
+static const struct pw_impl_module_events module_events = {
+	PW_VERSION_IMPL_MODULE_EVENTS,
 	.destroy = module_destroy,
 };
 
 SPA_EXPORT
-int pipewire__module_init(struct pw_module *module, const char *args)
+int pipewire__module_init(struct pw_impl_module *module, const char *args)
 {
-	struct pw_core *core = pw_module_get_core(module);
+	struct pw_context *context = pw_impl_module_get_context(module);
 	struct pw_properties *props;
 	struct impl *impl;
 
@@ -231,13 +233,13 @@ int pipewire__module_init(struct pw_module *module, const char *args)
 	else
 		props = NULL;
 
-	impl->core = core;
+	impl->context = context;
 	impl->properties = props;
 
-	pw_core_add_listener(core, &impl->core_listener, &core_events, impl);
-	pw_module_add_listener(module, &impl->module_listener, &module_events, impl);
+	pw_context_add_listener(context, &impl->context_listener, &context_events, impl);
+	pw_impl_module_add_listener(module, &impl->module_listener, &module_events, impl);
 
-	pw_module_update_properties(module, &SPA_DICT_INIT_ARRAY(module_props));
+	pw_impl_module_update_properties(module, &SPA_DICT_INIT_ARRAY(module_props));
 
 	return 0;
 }

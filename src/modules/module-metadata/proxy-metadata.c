@@ -29,13 +29,9 @@
 #include <spa/pod/parser.h>
 
 #include "pipewire/pipewire.h"
-#include "pipewire/private.h"
 #include "extensions/metadata.h"
 
 struct object_data {
-	struct pw_remote *remote;
-	struct pw_core *core;
-
 	struct pw_metadata *object;
 	struct spa_hook object_listener;
 	struct spa_hook object_methods;
@@ -44,7 +40,7 @@ struct object_data {
 	struct spa_hook proxy_listener;
 };
 
-static void object_proxy_destroy(void *_data)
+static void proxy_object_destroy(void *_data)
 {
 	struct object_data *data = _data;
 	spa_hook_remove(&data->object_listener);
@@ -52,44 +48,41 @@ static void object_proxy_destroy(void *_data)
 
 static const struct pw_proxy_events proxy_events = {
 	PW_VERSION_PROXY_EVENTS,
-	.destroy = object_proxy_destroy,
+	.destroy = proxy_object_destroy,
 };
 
-struct pw_proxy *pw_remote_metadata_export(struct pw_remote *remote,
-		uint32_t type, struct pw_properties *props, void *object,
+struct pw_proxy *pw_core_metadata_export(struct pw_core *core,
+		const char *type, const struct spa_dict *props, void *object,
 		size_t user_data_size)
 {
 	struct pw_metadata *meta = object;
-	struct spa_interface *iface;
+	struct spa_interface *iface, *miface;
 	struct pw_proxy *proxy;
 	struct object_data *data;
 
-	proxy = pw_core_proxy_create_object(remote->core_proxy,
-					    "metadata",
-					    PW_TYPE_INTERFACE_Metadata,
-					    PW_VERSION_METADATA,
-					    props ? &props->dict : NULL,
-					    user_data_size + sizeof(struct object_data));
-	if (props)
-		pw_properties_free(props);
+	proxy = pw_core_create_object(core,
+				    "metadata",
+				    PW_TYPE_INTERFACE_Metadata,
+				    PW_VERSION_METADATA,
+				    props,
+				    user_data_size + sizeof(struct object_data));
         if (proxy == NULL)
 		return NULL;
 
 	data = pw_proxy_get_user_data(proxy);
 	data = SPA_MEMBER(data, user_data_size, struct object_data);
-	data->remote = remote;
 	data->object = object;
-	data->core = pw_remote_get_core(remote);
 	data->proxy = proxy;
 
 	iface = (struct spa_interface*)proxy;
+	miface = (struct spa_interface*)meta;
 
 	pw_proxy_install_marshal(proxy, true);
 
 	pw_proxy_add_listener(proxy, &data->proxy_listener, &proxy_events, data);
 
 	pw_proxy_add_object_listener(proxy, &data->object_methods,
-			meta->iface.cb.funcs, meta->iface.cb.data);
+			miface->cb.funcs, miface->cb.data);
 	pw_metadata_add_listener(meta, &data->object_listener,
 			iface->cb.funcs, iface->cb.data);
 

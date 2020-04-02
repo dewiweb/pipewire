@@ -41,7 +41,8 @@ static void test_abi(void)
 		void (*state_changed) (void *data, enum pw_stream_state old,
 			enum pw_stream_state state, const char *error);
 	        void (*control_info) (void *data, uint32_t id, const struct pw_stream_control *control);
-		void (*format_changed) (void *data, const struct spa_pod *format);
+		void (*io_changed) (void *data, uint32_t id, void *area, uint32_t size);
+		void (*param_changed) (void *data, uint32_t id, const struct spa_pod *param);
 		void (*add_buffer) (void *data, struct pw_buffer *buffer);
 		void (*remove_buffer) (void *data, struct pw_buffer *buffer);
 		void (*process) (void *data);
@@ -51,14 +52,20 @@ static void test_abi(void)
 	TEST_FUNC(ev, test, destroy);
 	TEST_FUNC(ev, test, state_changed);
 	TEST_FUNC(ev, test, control_info);
-	TEST_FUNC(ev, test, format_changed);
+	TEST_FUNC(ev, test, io_changed);
+	TEST_FUNC(ev, test, param_changed);
 	TEST_FUNC(ev, test, add_buffer);
 	TEST_FUNC(ev, test, remove_buffer);
 	TEST_FUNC(ev, test, process);
 	TEST_FUNC(ev, test, drained);
 
+#if defined(__x86_64__)
 	spa_assert(sizeof(struct pw_buffer) == 24);
 	spa_assert(sizeof(struct pw_time) == 40);
+#else
+	fprintf(stderr, "%zd\n", sizeof(struct pw_buffer));
+	fprintf(stderr, "%zd\n", sizeof(struct pw_time));
+#endif
 
 	spa_assert(PW_VERSION_STREAM_EVENTS == 0);
 	spa_assert(sizeof(ev) == sizeof(test));
@@ -66,16 +73,12 @@ static void test_abi(void)
 	spa_assert(PW_STREAM_STATE_ERROR == -1);
 	spa_assert(PW_STREAM_STATE_UNCONNECTED == 0);
 	spa_assert(PW_STREAM_STATE_CONNECTING == 1);
-	spa_assert(PW_STREAM_STATE_CONFIGURE == 2);
-	spa_assert(PW_STREAM_STATE_READY == 3);
-	spa_assert(PW_STREAM_STATE_PAUSED == 4);
-	spa_assert(PW_STREAM_STATE_STREAMING == 5);
+	spa_assert(PW_STREAM_STATE_PAUSED == 2);
+	spa_assert(PW_STREAM_STATE_STREAMING == 3);
 
 	spa_assert(pw_stream_state_as_string(PW_STREAM_STATE_ERROR) != NULL);
 	spa_assert(pw_stream_state_as_string(PW_STREAM_STATE_UNCONNECTED) != NULL);
 	spa_assert(pw_stream_state_as_string(PW_STREAM_STATE_CONNECTING) != NULL);
-	spa_assert(pw_stream_state_as_string(PW_STREAM_STATE_CONFIGURE) != NULL);
-	spa_assert(pw_stream_state_as_string(PW_STREAM_STATE_READY) != NULL);
 	spa_assert(pw_stream_state_as_string(PW_STREAM_STATE_PAUSED) != NULL);
 	spa_assert(pw_stream_state_as_string(PW_STREAM_STATE_STREAMING) != NULL);
 }
@@ -89,7 +92,11 @@ static void stream_state_changed_error(void *data, enum pw_stream_state old,
 {
 	spa_assert_not_reached();
 }
-static void stream_format_changed_error(void *data, const struct spa_pod *format)
+static void stream_io_changed_error(void *data, uint32_t id, void *area, uint32_t size)
+{
+	spa_assert_not_reached();
+}
+static void stream_param_changed_error(void *data, uint32_t id, const struct spa_pod *format)
 {
 	spa_assert_not_reached();
 }
@@ -115,7 +122,8 @@ static const struct pw_stream_events stream_events_error =
 	PW_VERSION_STREAM_EVENTS,
         .destroy = stream_destroy_error,
         .state_changed = stream_state_changed_error,
-	.format_changed = stream_format_changed_error,
+	.io_changed = stream_io_changed_error,
+	.param_changed = stream_param_changed_error,
 	.add_buffer = stream_add_buffer_error,
 	.remove_buffer = stream_remove_buffer_error,
 	.process = stream_process_error,
@@ -130,8 +138,8 @@ static void stream_destroy_count(void *data)
 static void test_create(void)
 {
 	struct pw_main_loop *loop;
+	struct pw_context *context;
 	struct pw_core *core;
-	struct pw_remote *remote;
 	struct pw_stream *stream;
 	struct pw_stream_events stream_events = stream_events_error;
 	struct spa_hook listener = { 0, };
@@ -139,9 +147,11 @@ static void test_create(void)
 	struct pw_time tm;
 
 	loop = pw_main_loop_new(NULL);
-	core = pw_core_new(pw_main_loop_get_loop(loop), NULL, 12);
-	remote = pw_remote_new(core, NULL, 12);
-	stream = pw_stream_new(remote, "test", NULL);
+	context = pw_context_new(pw_main_loop_get_loop(loop), NULL, 12);
+	spa_assert(context != NULL);
+	core = pw_context_connect_self(context, NULL, 0);
+	spa_assert(core != NULL);
+	stream = pw_stream_new(core, "test", NULL);
 	spa_assert(stream != NULL);
 	pw_stream_add_listener(stream, &listener, &stream_events, stream);
 
@@ -150,8 +160,6 @@ static void test_create(void)
 	spa_assert(error == NULL);
 	/* check name */
 	spa_assert(!strcmp(pw_stream_get_name(stream), "test"));
-	/* check remote */
-	spa_assert(pw_stream_get_remote(stream) == remote);
 
 	/* check id, only when connected */
 	spa_assert(pw_stream_get_node_id(stream) == SPA_ID_INVALID);
@@ -172,25 +180,27 @@ static void test_create(void)
 	pw_stream_destroy(stream);
 	spa_assert(destroy_count == 1);
 
-	pw_core_destroy(core);
+	pw_context_destroy(context);
 	pw_main_loop_destroy(loop);
 }
 
 static void test_properties(void)
 {
 	struct pw_main_loop *loop;
+	struct pw_context *context;
 	struct pw_core *core;
 	const struct pw_properties *props;
-	struct pw_remote *remote;
 	struct pw_stream *stream;
 	struct pw_stream_events stream_events = stream_events_error;
 	struct spa_hook listener = { NULL, };
 	struct spa_dict_item items[3];
 
 	loop = pw_main_loop_new(NULL);
-	core = pw_core_new(pw_main_loop_get_loop(loop), NULL, 0);
-	remote = pw_remote_new(core, NULL, 0);
-	stream = pw_stream_new(remote, "test",
+	context = pw_context_new(pw_main_loop_get_loop(loop), NULL, 12);
+	spa_assert(context != NULL);
+	core = pw_context_connect_self(context, NULL, 0);
+	spa_assert(core != NULL);
+	stream = pw_stream_new(core, "test",
 			pw_properties_new("foo", "bar",
 					  "biz", "fuzz",
 					  NULL));
@@ -219,7 +229,7 @@ static void test_properties(void)
 	/* check destroy */
 	destroy_count = 0;
 	stream_events.destroy = stream_destroy_count;
-	pw_core_destroy(core);
+	pw_context_destroy(context);
 	spa_assert(destroy_count == 1);
 
 	pw_main_loop_destroy(loop);

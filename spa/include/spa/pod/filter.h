@@ -60,6 +60,7 @@ static inline int spa_pod_choice_fix_default(struct spa_pod_choice *choice)
 				memcpy(val, alt, size);
 		}
 		break;
+	case SPA_CHOICE_Flags:
 	case SPA_CHOICE_Enum:
 	{
 		void *best = NULL;
@@ -80,11 +81,36 @@ static inline int spa_pod_choice_fix_default(struct spa_pod_choice *choice)
 			choice->body.type = SPA_CHOICE_None;
 		break;
 	}
-	case SPA_CHOICE_Flags:
-		break;
 	}
 	return 0;
 }
+
+static inline int spa_pod_filter_flags_value(struct spa_pod_builder *b,
+		uint32_t type, const void *r1, const void *r2, uint32_t size)
+{
+	switch (type) {
+	case SPA_TYPE_Int:
+	{
+		int32_t val = (*(int32_t *) r1) & (*(int32_t *) r2);
+		if (val == 0)
+			return 0;
+		spa_pod_builder_int(b, val);
+		break;
+	}
+	case SPA_TYPE_Long:
+	{
+		int64_t val = (*(int64_t *) r1) & (*(int64_t *) r2);
+		if (val == 0)
+			return 0;
+		spa_pod_builder_long(b, val);
+		break;
+	}
+	default:
+		return -ENOTSUP;
+	}
+	return 1;
+}
+
 
 static inline int
 spa_pod_filter_prop(struct spa_pod_builder *b,
@@ -110,14 +136,14 @@ spa_pod_filter_prop(struct spa_pod_builder *b,
 	if (type != v2->type || size != v2->size || p1->key != p2->key)
 		return -EINVAL;
 
-	if (p1c == SPA_CHOICE_None) {
+	if (p1c == SPA_CHOICE_None || p1c == SPA_CHOICE_Flags) {
 		nalt1 = 1;
 	} else {
 		alt1 = SPA_MEMBER(alt1, size, void);
 		nalt1--;
 	}
 
-	if (p2c == SPA_CHOICE_None) {
+	if (p2c == SPA_CHOICE_None || p2c == SPA_CHOICE_Flags) {
 		nalt2 = 1;
 	} else {
 		alt2 = SPA_MEMBER(alt2, size, void);
@@ -191,7 +217,10 @@ spa_pod_filter_prop(struct spa_pod_builder *b,
 		nc->body.type = SPA_CHOICE_Enum;
 	}
 
-	if (p1c == SPA_CHOICE_Range && p2c == SPA_CHOICE_Range) {
+	if ((p1c == SPA_CHOICE_Range && p2c == SPA_CHOICE_Range) ||
+	    (p1c == SPA_CHOICE_Range && p2c == SPA_CHOICE_Step) ||
+	    (p1c == SPA_CHOICE_Step && p2c == SPA_CHOICE_Range) ||
+	    (p1c == SPA_CHOICE_Step && p2c == SPA_CHOICE_Step)) {
 		if (spa_pod_compare_value(type, alt1, alt2, size) < 0)
 			spa_pod_builder_raw(b, alt2, size);
 		else
@@ -208,11 +237,13 @@ spa_pod_filter_prop(struct spa_pod_builder *b,
 		nc->body.type = SPA_CHOICE_Range;
 	}
 
-	if (p1c == SPA_CHOICE_None && p2c == SPA_CHOICE_Flags)
-		return -ENOTSUP;
-
-	if (p1c == SPA_CHOICE_Range && p2c == SPA_CHOICE_Step)
-		return -ENOTSUP;
+	if ((p1c == SPA_CHOICE_None && p2c == SPA_CHOICE_Flags) ||
+	    (p1c == SPA_CHOICE_Flags && p2c == SPA_CHOICE_None) ||
+	    (p1c == SPA_CHOICE_Flags && p2c == SPA_CHOICE_Flags)) {
+		if (spa_pod_filter_flags_value(b, type, alt1, alt2, size) != 1)
+			return -EINVAL;
+		nc->body.type = SPA_CHOICE_Flags;
+	}
 
 	if (p1c == SPA_CHOICE_Range && p2c == SPA_CHOICE_Flags)
 		return -ENOTSUP;
@@ -222,25 +253,16 @@ spa_pod_filter_prop(struct spa_pod_builder *b,
 
 	if (p1c == SPA_CHOICE_Step && p2c == SPA_CHOICE_None)
 		return -ENOTSUP;
-	if (p1c == SPA_CHOICE_Step && p2c == SPA_CHOICE_Range)
-		return -ENOTSUP;
-
-	if (p1c == SPA_CHOICE_Step && p2c == SPA_CHOICE_Step)
-		return -ENOTSUP;
 	if (p1c == SPA_CHOICE_Step && p2c == SPA_CHOICE_Enum)
 		return -ENOTSUP;
 	if (p1c == SPA_CHOICE_Step && p2c == SPA_CHOICE_Flags)
 		return -ENOTSUP;
 
-	if (p1c == SPA_CHOICE_Flags && p2c == SPA_CHOICE_None)
-		return -ENOTSUP;
 	if (p1c == SPA_CHOICE_Flags && p2c == SPA_CHOICE_Range)
 		return -ENOTSUP;
 	if (p1c == SPA_CHOICE_Flags && p2c == SPA_CHOICE_Step)
 		return -ENOTSUP;
 	if (p1c == SPA_CHOICE_Flags && p2c == SPA_CHOICE_Enum)
-		return -ENOTSUP;
-	if (p1c == SPA_CHOICE_Flags && p2c == SPA_CHOICE_Flags)
 		return -ENOTSUP;
 
 	spa_pod_builder_pop(b, &f);
@@ -356,18 +378,18 @@ spa_pod_filter(struct spa_pod_builder *b,
         spa_return_val_if_fail(pod != NULL, -EINVAL);
         spa_return_val_if_fail(b != NULL, -EINVAL);
 
-	if (filter == NULL) {
-		spa_pod_builder_raw_padded(b, pod, SPA_POD_SIZE(pod));
-		*result = (struct spa_pod*)b->data;
-		return 0;
-	}
-
 	spa_pod_builder_get_state(b, &state);
-	if ((res = spa_pod_filter_part(b, pod, SPA_POD_SIZE(pod), filter, SPA_POD_SIZE(filter))) < 0) {
-		spa_pod_builder_reset(b, &state);
-	}
+	if (filter == NULL)
+		res = spa_pod_builder_raw_padded(b, pod, SPA_POD_SIZE(pod));
 	else
-		*result = (struct spa_pod*)spa_pod_builder_deref(b, state.offset);
+		res = spa_pod_filter_part(b, pod, SPA_POD_SIZE(pod), filter, SPA_POD_SIZE(filter));
 
+	if (res < 0) {
+		spa_pod_builder_reset(b, &state);
+	} else if (result) {
+		*result = (struct spa_pod*)spa_pod_builder_deref(b, state.offset);
+		if (*result == NULL)
+			res = -ENOSPC;
+	}
 	return res;
 }

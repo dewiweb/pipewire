@@ -37,6 +37,10 @@
 #include <spa/utils/type.h>
 #include <spa/utils/names.h>
 
+#ifdef __FreeBSD__
+#define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
+#endif
+
 #define NAME "logger"
 
 #define DEFAULT_LOG_LEVEL SPA_LOG_LEVEL_INFO
@@ -59,7 +63,7 @@ struct impl {
 	unsigned int timestamp:1;
 };
 
-static void
+static SPA_PRINTF_FUNC(6,0) void
 impl_log_logv(void *object,
 	      enum spa_log_level level,
 	      const char *file,
@@ -121,7 +125,7 @@ impl_log_logv(void *object,
 }
 
 
-static void
+static SPA_PRINTF_FUNC(6,7) void
 impl_log_log(void *object,
 	     enum spa_log_level level,
 	     const char *file,
@@ -170,7 +174,7 @@ static const struct spa_log_methods impl_log = {
 	.logv = impl_log_logv,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
 
@@ -179,7 +183,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct impl *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Log)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Log) == 0)
 		*interface = &this->log;
 	else
 		return -ENOENT;
@@ -218,7 +222,6 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct impl *this;
-	uint32_t i;
 	struct spa_loop *loop = NULL;
 	const char *str;
 
@@ -236,16 +239,9 @@ impl_init(const struct spa_handle_factory *factory,
 			&impl_log, this);
 	this->log.level = DEFAULT_LOG_LEVEL;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Loop:
-			loop = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_System:
-			this->system = support[i].data;
-			break;
-		}
-	}
+	loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
+	this->system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_System);
+
 	if (loop != NULL && this->system != NULL) {
 		this->source.func = on_trace_event;
 		this->source.data = this;

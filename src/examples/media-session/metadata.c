@@ -22,7 +22,14 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include "pipewire/pipewire.h"
+#include "pipewire/array.h"
+
 #include <extensions/metadata.h>
+
+#include "media-session.h"
+
+#define NAME "metadata"
 
 #define pw_metadata_emit(hooks,method,version,...)			\
 	spa_hook_list_call_simple(hooks, struct pw_metadata_events,	\
@@ -54,17 +61,20 @@ static void set_item(struct item *item, uint32_t subject, const char *key, const
 	item->value = strdup(value);
 }
 
-struct sm_metadata {
-	struct pw_metadata impl;
+struct metadata {
+	struct spa_interface iface;
+
+	struct sm_media_session *session;
+	struct spa_hook session_listener;
 
 	struct spa_hook_list hooks;
 
 	struct pw_properties *properties;
-
 	struct pw_array metadata;
+	struct pw_proxy *proxy;
 };
 
-static void emit_properties(struct sm_metadata *this, const struct spa_dict *dict)
+static void emit_properties(struct metadata *this, const struct spa_dict *dict)
 {
 	struct item *item;
 	pw_array_for_each(item, &this->metadata) {
@@ -81,7 +91,7 @@ static int impl_add_listener(void *object,
 		const struct pw_metadata_events *events,
 		void *data)
 {
-	struct sm_metadata *this = object;
+	struct metadata *this = object;
 	struct spa_hook_list save;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
@@ -96,7 +106,7 @@ static int impl_add_listener(void *object,
         return 0;
 }
 
-static struct item *find_item(struct sm_metadata *this, uint32_t subject, const char *key)
+static struct item *find_item(struct metadata *this, uint32_t subject, const char *key)
 {
 	struct item *item;
 
@@ -107,7 +117,7 @@ static struct item *find_item(struct sm_metadata *this, uint32_t subject, const 
 	return NULL;
 }
 
-static void clear_items(struct sm_metadata *this)
+static void clear_items(struct metadata *this)
 {
 	struct item *item;
 
@@ -123,7 +133,7 @@ static int impl_set_property(void *object,
 			const char *type,
 			const char *value)
 {
-	struct sm_metadata *this = object;
+	struct metadata *this = object;
 	struct item *item = NULL;
 
 	if (key == NULL)
@@ -160,7 +170,7 @@ static int impl_set_property(void *object,
 
 static int impl_clear(void *object)
 {
-	struct sm_metadata *this = object;
+	struct metadata *this = object;
 	clear_items(this);
 	return 0;
 }
@@ -172,33 +182,60 @@ struct pw_metadata_methods impl_metadata = {
 	.clear = impl_clear,
 };
 
-struct sm_metadata *
-sm_metadata_new(struct pw_properties *props)
+static void session_destroy(void *data)
 {
-	struct sm_metadata *md;
+	struct metadata *this = data;
 
-	if (props == NULL)
-		props = pw_properties_new(NULL, NULL);
-	if (props == NULL)
-		return NULL;
+	spa_hook_remove(&this->session_listener);
+	pw_proxy_destroy(this->proxy);
+
+	clear_items(this);
+	pw_array_clear(&this->metadata);
+	pw_properties_free(this->properties);
+	free(this);
+}
+
+static const struct sm_media_session_events session_events = {
+	SM_VERSION_MEDIA_SESSION_EVENTS,
+	.destroy = session_destroy,
+};
+
+int sm_metadata_start(struct sm_media_session *sess)
+{
+	struct metadata *md;
+	int res;
 
 	md = calloc(1, sizeof(*md));
-	md->properties = props;
+	if (md == NULL)
+		return -errno;
+
+	md->session = sess;
+	md->properties = pw_properties_new(NULL, NULL);
 	pw_array_init(&md->metadata, 4096);
 
-	md->impl.iface = SPA_INTERFACE_INIT(
+	md->iface = SPA_INTERFACE_INIT(
 			PW_TYPE_INTERFACE_Metadata,
 			PW_VERSION_METADATA,
 			&impl_metadata, md);
         spa_hook_list_init(&md->hooks);
 
-	return md;
-}
+	md->proxy = sm_media_session_export(sess,
+			PW_TYPE_INTERFACE_Metadata,
+			NULL,
+			md,
+			0);
+	if (md->proxy == NULL) {
+		res = -errno;
+		goto error_free;
+	}
 
-void sm_metadata_destroy(struct sm_metadata *this)
-{
-	clear_items(this);
-	pw_array_clear(&this->metadata);
-	pw_properties_free(this->properties);
-	free(this);
+	sm_media_session_add_listener(sess, &md->session_listener,
+			&session_events, md);
+	return 0;
+
+error_free:
+	pw_array_clear(&md->metadata);
+	pw_properties_free(md->properties);
+	free(md);
+	return res;
 }

@@ -26,20 +26,21 @@
 #include <sys/mman.h>
 #include <signal.h>
 
+#include <spa/utils/result.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/param/props.h>
 
-#include <pipewire/pipewire.h>
+#include <pipewire/impl.h>
 
 struct data {
 	struct pw_main_loop *loop;
 
+	struct pw_context *context;
+
 	struct pw_core *core;
+	struct spa_hook core_listener;
 
-	struct pw_remote *remote;
-	struct spa_hook remote_listener;
-
-	struct pw_device *device;
+	struct pw_impl_device *device;
 	const char *library;
 	const char *factory;
 	const char *path;
@@ -47,55 +48,43 @@ struct data {
 
 static int make_device(struct data *data)
 {
-	struct pw_factory *factory;
+	struct pw_impl_factory *factory;
 	struct pw_properties *props;
 
-        factory = pw_core_find_factory(data->core, "spa-device-factory");
+        factory = pw_context_find_factory(data->context, "spa-device-factory");
 	if (factory == NULL)
 		return -1;
 
         props = pw_properties_new(SPA_KEY_LIBRARY_NAME, data->library,
                                   SPA_KEY_FACTORY_NAME, data->factory, NULL);
 
-	data->device = pw_factory_create_object(factory,
+	data->device = pw_impl_factory_create_object(factory,
 					      NULL,
 					      PW_TYPE_INTERFACE_Device,
-					      PW_VERSION_DEVICE_PROXY,
+					      PW_VERSION_DEVICE,
 					      props, SPA_ID_INVALID);
 
-	pw_remote_export(data->remote, SPA_TYPE_INTERFACE_Device, NULL,
-			pw_device_get_implementation(data->device), 0);
+	pw_core_export(data->core, SPA_TYPE_INTERFACE_Device, NULL,
+			pw_impl_device_get_implementation(data->device), 0);
 
 	return 0;
 }
 
-static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remote_state state, const char *error)
+static void on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
 {
-	struct data *data = _data;
+	struct data *d = data;
 
-	switch (state) {
-	case PW_REMOTE_STATE_ERROR:
-		printf("remote error: %s\n", error);
-		pw_main_loop_quit(data->loop);
-		break;
+	pw_log_error("error id:%u seq:%d res:%d (%s): %s",
+			id, seq, res, spa_strerror(res), message);
 
-	case PW_REMOTE_STATE_CONNECTED:
-		printf("remote state: \"%s\"\n", pw_remote_state_as_string(state));
-		if (make_device(data) < 0) {
-			pw_log_error("can't make device");
-			pw_main_loop_quit(data->loop);
-		}
-		break;
-
-	default:
-		printf("remote state: \"%s\"\n", pw_remote_state_as_string(state));
-		break;
+	if (id == 0) {
+		pw_main_loop_quit(d->loop);
 	}
 }
 
-static const struct pw_remote_events remote_events = {
-	PW_VERSION_REMOTE_EVENTS,
-	.state_changed = on_state_changed,
+static const struct pw_core_events core_events = {
+	PW_VERSION_CORE_EVENTS,
+	.error = on_core_error,
 };
 
 static void do_quit(void *data, int signal_number)
@@ -122,21 +111,28 @@ int main(int argc, char *argv[])
 	l = pw_main_loop_get_loop(data.loop);
         pw_loop_add_signal(l, SIGINT, do_quit, &data);
         pw_loop_add_signal(l, SIGTERM, do_quit, &data);
-	data.core = pw_core_new(l, NULL, 0);
-        data.remote = pw_remote_new(data.core, NULL, 0);
+	data.context = pw_context_new(l, NULL, 0);
 	data.library = argv[1];
 	data.factory = argv[2];
 
-	pw_module_load(data.core, "libpipewire-module-spa-device-factory", NULL, NULL);
-	pw_module_load(data.core, "libpipewire-module-client-device", NULL, NULL);
+	pw_context_load_module(data.context, "libpipewire-module-spa-device-factory", NULL, NULL);
 
-	pw_remote_add_listener(data.remote, &data.remote_listener, &remote_events, &data);
+        data.core = pw_context_connect(data.context, NULL, 0);
+	if (data.core == NULL) {
+		pw_log_error("can't connect %m");
+		return -1;
+	}
 
-        pw_remote_connect(data.remote);
+	pw_core_add_listener(data.core, &data.core_listener, &core_events, &data);
+
+	if (make_device(&data) < 0) {
+		pw_log_error("can't make device");
+		return -1;
+	}
 
 	pw_main_loop_run(data.loop);
 
-	pw_core_destroy(data.core);
+	pw_context_destroy(data.context);
 	pw_main_loop_destroy(data.loop);
 
 	return 0;

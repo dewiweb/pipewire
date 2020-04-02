@@ -194,10 +194,15 @@ clock_disabled:
   }
 }
 
+static void unref_queue_item(gpointer data, gpointer user_data)
+{
+  gst_mini_object_unref(data);
+}
+
 static void
 clear_queue (GstPipeWireSrc *pwsrc)
 {
-  g_queue_foreach (&pwsrc->queue, (GFunc) gst_mini_object_unref, NULL);
+  g_queue_foreach (&pwsrc->queue, unref_queue_item, pwsrc);
   g_queue_clear (&pwsrc->queue);
 }
 
@@ -208,11 +213,9 @@ gst_pipewire_src_finalize (GObject * object)
 
   clear_queue (pwsrc);
 
-  pw_core_destroy (pwsrc->core);
-  pwsrc->core = NULL;
-  pw_thread_loop_destroy (pwsrc->main_loop);
-  pwsrc->main_loop = NULL;
-  pw_loop_destroy (pwsrc->loop);
+  pw_context_destroy (pwsrc->context);
+  pwsrc->context = NULL;
+  pw_thread_loop_destroy (pwsrc->loop);
   pwsrc->loop = NULL;
 
   if (pwsrc->properties)
@@ -329,10 +332,9 @@ gst_pipewire_src_init (GstPipeWireSrc * src)
   src->client_name = g_strdup(pw_get_client_name ());
 
   src->pool =  gst_pipewire_pool_new ();
-  src->loop = pw_loop_new (NULL);
-  src->main_loop = pw_thread_loop_new (src->loop, "pipewire-main-loop");
-  src->core = pw_core_new (src->loop, NULL, 0);
-  GST_DEBUG ("loop %p, mainloop %p", src->loop, src->main_loop);
+  src->loop = pw_thread_loop_new ("pipewire-main-loop", NULL);
+  src->context = pw_context_new (pw_thread_loop_get_loop(src->loop), NULL, 0);
+  GST_DEBUG ("loop %p context %p", src->loop, src->context);
 
 }
 
@@ -349,9 +351,9 @@ buffer_recycle (GstMiniObject *obj)
   src = data->owner;
 
   GST_LOG_OBJECT (obj, "recycle buffer");
-  pw_thread_loop_lock (src->main_loop);
+  pw_thread_loop_lock (src->loop);
   pw_stream_queue_buffer (src->stream, data->b);
-  pw_thread_loop_unlock (src->main_loop);
+  pw_thread_loop_unlock (src->loop);
 
   return FALSE;
 }
@@ -362,7 +364,7 @@ on_add_buffer (void *_data, struct pw_buffer *b)
   GstPipeWireSrc *pwsrc = _data;
   GstPipeWirePoolData *data;
 
-  GST_LOG_OBJECT (pwsrc, "add buffer");
+  GST_DEBUG_OBJECT (pwsrc, "add buffer");
   gst_pipewire_pool_wrap_buffer (pwsrc->pool, b);
   data = b->user_data;
   data->owner = pwsrc;
@@ -377,7 +379,7 @@ on_remove_buffer (void *_data, struct pw_buffer *b)
   GstBuffer *buf = data->buf;
   GList *walk;
 
-  GST_LOG_OBJECT (pwsrc, "remove buffer %p", buf);
+  GST_DEBUG_OBJECT (pwsrc, "remove buffer %p", buf);
 
   GST_MINI_OBJECT_CAST (buf)->dispose = NULL;
 
@@ -406,7 +408,7 @@ on_process (void *_data)
 
   b = pw_stream_dequeue_buffer (pwsrc->stream);
   if (b == NULL)
-	  return;
+          return;
 
   data = b->user_data;
   buf = data->buf;
@@ -418,7 +420,7 @@ on_process (void *_data)
 
   h = data->header;
   if (h) {
-    GST_INFO ("pts %" G_GUINT64_FORMAT ", dts_offset %"G_GUINT64_FORMAT, h->pts, h->dts_offset);
+    GST_LOG_OBJECT (pwsrc, "pts %" G_GUINT64_FORMAT ", dts_offset %" G_GUINT64_FORMAT, h->pts, h->dts_offset);
 
     if (GST_CLOCK_TIME_IS_VALID (h->pts)) {
       GST_BUFFER_PTS (buf) = h->pts + GST_PIPEWIRE_CLOCK (pwsrc->clock)->time_offset;
@@ -438,14 +440,14 @@ on_process (void *_data)
   gst_buffer_ref (buf);
   g_queue_push_tail (&pwsrc->queue, buf);
 
-  pw_thread_loop_signal (pwsrc->main_loop, FALSE);
+  pw_thread_loop_signal (pwsrc->loop, FALSE);
   return;
 }
 
 static void
 on_state_changed (void *data,
-		  enum pw_stream_state old,
-		  enum pw_stream_state state, const char *error)
+                  enum pw_stream_state old,
+                  enum pw_stream_state state, const char *error)
 {
   GstPipeWireSrc *pwsrc = data;
 
@@ -454,8 +456,6 @@ on_state_changed (void *data,
   switch (state) {
     case PW_STREAM_STATE_UNCONNECTED:
     case PW_STREAM_STATE_CONNECTING:
-    case PW_STREAM_STATE_CONFIGURE:
-    case PW_STREAM_STATE_READY:
     case PW_STREAM_STATE_PAUSED:
     case PW_STREAM_STATE_STREAMING:
       break;
@@ -464,7 +464,7 @@ on_state_changed (void *data,
           ("stream error: %s", error), (NULL));
       break;
   }
-  pw_thread_loop_signal (pwsrc->main_loop, FALSE);
+  pw_thread_loop_signal (pwsrc->loop, FALSE);
 }
 
 static void
@@ -475,7 +475,6 @@ parse_stream_properties (GstPipeWireSrc *pwsrc, const struct pw_properties *prop
 
   GST_OBJECT_LOCK (pwsrc);
   var = pw_properties_get (props, PW_KEY_STREAM_IS_LIVE);
-  var = "true";
   is_live = pwsrc->is_live = var ? pw_properties_parse_bool(var) : FALSE;
 
   var = pw_properties_get (props, PW_KEY_STREAM_LATENCY_MIN);
@@ -494,7 +493,7 @@ static gboolean
 gst_pipewire_src_stream_start (GstPipeWireSrc *pwsrc)
 {
   const char *error = NULL;
-  pw_thread_loop_lock (pwsrc->main_loop);
+  pw_thread_loop_lock (pwsrc->loop);
   GST_DEBUG_OBJECT (pwsrc, "doing stream start");
   while (TRUE) {
     enum pw_stream_state state = pw_stream_get_state (pwsrc->stream, &error);
@@ -506,24 +505,21 @@ gst_pipewire_src_stream_start (GstPipeWireSrc *pwsrc)
     if (state == PW_STREAM_STATE_ERROR)
       goto start_error;
 
-    if (pw_remote_get_state(pwsrc->remote, &error) == PW_REMOTE_STATE_ERROR)
-      goto start_error;
-
-    pw_thread_loop_wait (pwsrc->main_loop);
+    pw_thread_loop_wait (pwsrc->loop);
   }
 
   parse_stream_properties (pwsrc, pw_stream_get_properties (pwsrc->stream));
   GST_DEBUG_OBJECT (pwsrc, "signal started");
   pwsrc->started = TRUE;
-  pw_thread_loop_signal (pwsrc->main_loop, FALSE);
-  pw_thread_loop_unlock (pwsrc->main_loop);
+  pw_thread_loop_signal (pwsrc->loop, FALSE);
+  pw_thread_loop_unlock (pwsrc->loop);
 
   return TRUE;
 
 start_error:
   {
     GST_DEBUG_OBJECT (pwsrc, "error starting stream: %s", error);
-    pw_thread_loop_unlock (pwsrc->main_loop);
+    pw_thread_loop_unlock (pwsrc->loop);
     return FALSE;
   }
 }
@@ -534,7 +530,7 @@ wait_negotiated (GstPipeWireSrc *this)
   enum pw_stream_state state;
   const char *error = NULL;
 
-  pw_thread_loop_lock (this->main_loop);
+  pw_thread_loop_lock (this->loop);
   while (TRUE) {
     state = pw_stream_get_state (this->stream, &error);
 
@@ -544,16 +540,13 @@ wait_negotiated (GstPipeWireSrc *this)
     if (state == PW_STREAM_STATE_ERROR)
       break;
 
-    if (pw_remote_get_state(this->remote, &error) == PW_REMOTE_STATE_ERROR)
-      break;
-
     if (this->started)
       break;
 
-    pw_thread_loop_wait (this->main_loop);
+    pw_thread_loop_wait (this->loop);
   }
   GST_DEBUG_OBJECT (this, "got started signal");
-  pw_thread_loop_unlock (this->main_loop);
+  pw_thread_loop_unlock (this->loop);
 
   return state;
 }
@@ -600,7 +593,7 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
   gst_caps_unref (caps);
 
   /* first disconnect */
-  pw_thread_loop_lock (pwsrc->main_loop);
+  pw_thread_loop_lock (pwsrc->loop);
   if (pw_stream_get_state(pwsrc->stream, &error) != PW_STREAM_STATE_UNCONNECTED) {
     GST_DEBUG_OBJECT (basesrc, "disconnect capture");
     pw_stream_disconnect (pwsrc->stream);
@@ -616,14 +609,14 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
         goto connect_error;
       }
 
-      pw_thread_loop_wait (pwsrc->main_loop);
+      pw_thread_loop_wait (pwsrc->loop);
     }
   }
 
   GST_DEBUG_OBJECT (basesrc, "connect capture with path %s", pwsrc->path);
   pw_stream_connect (pwsrc->stream,
                      PW_DIRECTION_INPUT,
-                     pwsrc->path ? (uint32_t)atoi(pwsrc->path) : SPA_ID_INVALID,
+                     pwsrc->path ? (uint32_t)atoi(pwsrc->path) : PW_ID_ANY,
                      PW_STREAM_FLAG_AUTOCONNECT,
                      (const struct spa_pod **)possible->pdata,
                      possible->len);
@@ -640,12 +633,9 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
     if (state == PW_STREAM_STATE_ERROR)
       goto connect_error;
 
-    if (pw_remote_get_state(pwsrc->remote, &error) == PW_REMOTE_STATE_ERROR)
-      goto connect_error;
-
-    pw_thread_loop_wait (pwsrc->main_loop);
+    pw_thread_loop_wait (pwsrc->loop);
   }
-  pw_thread_loop_unlock (pwsrc->main_loop);
+  pw_thread_loop_unlock (pwsrc->loop);
 
   result = gst_pipewire_src_stream_start (pwsrc);
 
@@ -680,28 +670,27 @@ no_common_caps:
   }
 connect_error:
   {
-    pw_thread_loop_unlock (pwsrc->main_loop);
+    pw_thread_loop_unlock (pwsrc->loop);
     return FALSE;
   }
 }
 
 static void
-on_format_changed (void *data,
-                   const struct spa_pod *format)
+on_param_changed (void *data, uint32_t id,
+                   const struct spa_pod *param)
 {
   GstPipeWireSrc *pwsrc = data;
   GstCaps *caps;
   gboolean res;
 
-  if (format == NULL) {
+  if (param == NULL || id != SPA_PARAM_Format) {
     GST_DEBUG_OBJECT (pwsrc, "clear format");
-    pw_stream_finish_format (pwsrc->stream, 0, NULL, 0);
     return;
   }
 
   gst_pipewire_clock_reset (GST_PIPEWIRE_CLOCK (pwsrc->clock), 0);
 
-  caps = gst_caps_from_format (format);
+  caps = gst_caps_from_format (param);
   GST_DEBUG_OBJECT (pwsrc, "we got format %" GST_PTR_FORMAT, caps);
   res = gst_base_src_set_caps (GST_BASE_SRC (pwsrc), caps);
   gst_caps_unref (caps);
@@ -713,23 +702,23 @@ on_format_changed (void *data,
 
     spa_pod_builder_init (&b, buffer, sizeof (buffer));
     params[0] = spa_pod_builder_add_object (&b,
-	SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
-	SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(16, 1, INT32_MAX),
-	SPA_PARAM_BUFFERS_blocks,  SPA_POD_CHOICE_RANGE_Int(0, 1, INT32_MAX),
-	SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
-	SPA_PARAM_BUFFERS_stride,  SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
-	SPA_PARAM_BUFFERS_align,   SPA_POD_Int(16));
+        SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+        SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(16, 1, INT32_MAX),
+        SPA_PARAM_BUFFERS_blocks,  SPA_POD_CHOICE_RANGE_Int(0, 1, INT32_MAX),
+        SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
+        SPA_PARAM_BUFFERS_stride,  SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
+        SPA_PARAM_BUFFERS_align,   SPA_POD_Int(16));
 
     params[1] = spa_pod_builder_add_object (&b,
-	SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+        SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
         SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
         SPA_PARAM_META_size, SPA_POD_Int(sizeof (struct spa_meta_header)));
 
     GST_DEBUG_OBJECT (pwsrc, "doing finish format");
-    pw_stream_finish_format (pwsrc->stream, 0, params, 2);
+    pw_stream_update_params (pwsrc->stream, params, 2);
   } else {
     GST_WARNING_OBJECT (pwsrc, "finish format with error");
-    pw_stream_finish_format (pwsrc->stream, -EINVAL, NULL, 0);
+    pw_stream_set_error (pwsrc->stream, -EINVAL, "unhandled format");
   }
 }
 
@@ -738,11 +727,11 @@ gst_pipewire_src_unlock (GstBaseSrc * basesrc)
 {
   GstPipeWireSrc *pwsrc = GST_PIPEWIRE_SRC (basesrc);
 
-  pw_thread_loop_lock (pwsrc->main_loop);
+  pw_thread_loop_lock (pwsrc->loop);
   GST_DEBUG_OBJECT (pwsrc, "setting flushing");
   pwsrc->flushing = TRUE;
-  pw_thread_loop_signal (pwsrc->main_loop, FALSE);
-  pw_thread_loop_unlock (pwsrc->main_loop);
+  pw_thread_loop_signal (pwsrc->loop, FALSE);
+  pw_thread_loop_unlock (pwsrc->loop);
 
   return TRUE;
 }
@@ -752,10 +741,10 @@ gst_pipewire_src_unlock_stop (GstBaseSrc * basesrc)
 {
   GstPipeWireSrc *pwsrc = GST_PIPEWIRE_SRC (basesrc);
 
-  pw_thread_loop_lock (pwsrc->main_loop);
+  pw_thread_loop_lock (pwsrc->loop);
   GST_DEBUG_OBJECT (pwsrc, "unsetting flushing");
   pwsrc->flushing = FALSE;
-  pw_thread_loop_unlock (pwsrc->main_loop);
+  pw_thread_loop_unlock (pwsrc->loop);
 
   return TRUE;
 }
@@ -824,7 +813,7 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
   if (!pwsrc->negotiated)
     goto not_negotiated;
 
-  pw_thread_loop_lock (pwsrc->main_loop);
+  pw_thread_loop_lock (pwsrc->loop);
   while (TRUE) {
     enum pw_stream_state state;
 
@@ -842,13 +831,13 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
       goto streaming_stopped;
 
     buf = g_queue_pop_head (&pwsrc->queue);
-    GST_DEBUG ("popped buffer %p", buf);
+    GST_LOG_OBJECT (pwsrc, "popped buffer %p", buf);
     if (buf != NULL)
       break;
 
-    pw_thread_loop_wait (pwsrc->main_loop);
+    pw_thread_loop_wait (pwsrc->loop);
   }
-  pw_thread_loop_unlock (pwsrc->main_loop);
+  pw_thread_loop_unlock (pwsrc->loop);
 
   gst_buffer_unref (buf);
 
@@ -872,8 +861,8 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
   if (GST_CLOCK_TIME_IS_VALID (dts))
     dts = (dts >= base_time ? dts - base_time : 0);
 
-  GST_INFO ("pts %" G_GUINT64_FORMAT ", dts %"G_GUINT64_FORMAT
-      ", base-time %"GST_TIME_FORMAT" -> %"GST_TIME_FORMAT", %"GST_TIME_FORMAT,
+  GST_LOG_OBJECT (pwsrc,
+      "pts %" G_GUINT64_FORMAT ", dts %" G_GUINT64_FORMAT ", base-time %" GST_TIME_FORMAT " -> %" GST_TIME_FORMAT ", %" GST_TIME_FORMAT,
       GST_BUFFER_PTS (*buffer), GST_BUFFER_DTS (*buffer), GST_TIME_ARGS (base_time),
       GST_TIME_ARGS (pts), GST_TIME_ARGS (dts));
 
@@ -888,12 +877,12 @@ not_negotiated:
   }
 streaming_error:
   {
-    pw_thread_loop_unlock (pwsrc->main_loop);
+    pw_thread_loop_unlock (pwsrc->loop);
     return GST_FLOW_ERROR;
   }
 streaming_stopped:
   {
-    pw_thread_loop_unlock (pwsrc->main_loop);
+    pw_thread_loop_unlock (pwsrc->loop);
     return GST_FLOW_FLUSHING;
   }
 }
@@ -911,31 +900,11 @@ gst_pipewire_src_stop (GstBaseSrc * basesrc)
 
   pwsrc = GST_PIPEWIRE_SRC (basesrc);
 
-  pw_thread_loop_lock (pwsrc->main_loop);
+  pw_thread_loop_lock (pwsrc->loop);
   clear_queue (pwsrc);
-  pw_thread_loop_unlock (pwsrc->main_loop);
+  pw_thread_loop_unlock (pwsrc->loop);
 
   return TRUE;
-}
-
-static void
-on_remote_state_changed (void *data, enum pw_remote_state old, enum pw_remote_state state, const char *error)
-{
-  GstPipeWireSrc *pwsrc = data;
-
-  GST_DEBUG ("got remote state %s", pw_remote_state_as_string (state));
-
-  switch (state) {
-    case PW_REMOTE_STATE_UNCONNECTED:
-    case PW_REMOTE_STATE_CONNECTING:
-    case PW_REMOTE_STATE_CONNECTED:
-      break;
-    case PW_REMOTE_STATE_ERROR:
-      GST_ELEMENT_ERROR (pwsrc, RESOURCE, FAILED,
-          ("remote error: %s", error), (NULL));
-      break;
-  }
-  pw_thread_loop_signal (pwsrc->main_loop, FALSE);
 }
 
 static gboolean
@@ -952,54 +921,32 @@ copy_properties (GQuark field_id,
   return TRUE;
 }
 
-static const struct pw_remote_events remote_events = {
-	PW_VERSION_REMOTE_EVENTS,
-	.state_changed = on_remote_state_changed,
-};
-
 static const struct pw_stream_events stream_events = {
-	PW_VERSION_STREAM_EVENTS,
-	.state_changed = on_state_changed,
-	.format_changed = on_format_changed,
-	.add_buffer = on_add_buffer,
-	.remove_buffer = on_remove_buffer,
-	.process = on_process,
+        PW_VERSION_STREAM_EVENTS,
+        .state_changed = on_state_changed,
+        .param_changed = on_param_changed,
+        .add_buffer = on_add_buffer,
+        .remove_buffer = on_remove_buffer,
+        .process = on_process,
 };
 
 static gboolean
 gst_pipewire_src_open (GstPipeWireSrc * pwsrc)
 {
   struct pw_properties *props;
-  const char *error = NULL;
 
-  if (pw_thread_loop_start (pwsrc->main_loop) < 0)
+  if (pw_thread_loop_start (pwsrc->loop) < 0)
     goto mainloop_failed;
 
-  pw_thread_loop_lock (pwsrc->main_loop);
-  if ((pwsrc->remote = pw_remote_new (pwsrc->core, NULL, 0)) == NULL)
-    goto no_remote;
-
-  pw_remote_add_listener (pwsrc->remote,
-			  &pwsrc->remote_listener,
-			  &remote_events, pwsrc);
+  pw_thread_loop_lock (pwsrc->loop);
 
   if (pwsrc->fd == -1)
-    pw_remote_connect (pwsrc->remote);
+    pwsrc->core = pw_context_connect (pwsrc->context, NULL, 0);
   else
-    pw_remote_connect_fd (pwsrc->remote, dup(pwsrc->fd));
+    pwsrc->core = pw_context_connect_fd (pwsrc->context, dup(pwsrc->fd), NULL, 0);
 
-  while (TRUE) {
-    enum pw_remote_state state = pw_remote_get_state(pwsrc->remote, &error);
-
-    GST_DEBUG ("waiting for CONNECTED, now %s", pw_remote_state_as_string (state));
-    if (state == PW_REMOTE_STATE_CONNECTED)
-      break;
-
-    if (state == PW_REMOTE_STATE_ERROR)
+  if (pwsrc->core == NULL)
       goto connect_error;
-
-    pw_thread_loop_wait (pwsrc->main_loop);
-  }
 
   if (pwsrc->properties) {
     props = pw_properties_new (NULL, NULL);
@@ -1008,18 +955,19 @@ gst_pipewire_src_open (GstPipeWireSrc * pwsrc)
     props = NULL;
   }
 
-  if ((pwsrc->stream = pw_stream_new (pwsrc->remote, pwsrc->client_name, props)) == NULL)
+  if ((pwsrc->stream = pw_stream_new (pwsrc->core,
+                                  pwsrc->client_name, props)) == NULL)
     goto no_stream;
 
 
   pw_stream_add_listener(pwsrc->stream,
-			 &pwsrc->stream_listener,
-			 &stream_events,
-			 pwsrc);
+                         &pwsrc->stream_listener,
+                         &stream_events,
+                         pwsrc);
 
 
   pwsrc->clock = gst_pipewire_clock_new (pwsrc->stream, pwsrc->last_time);
-  pw_thread_loop_unlock (pwsrc->main_loop);
+  pw_thread_loop_unlock (pwsrc->loop);
 
   return TRUE;
 
@@ -1029,21 +977,16 @@ mainloop_failed:
     GST_ELEMENT_ERROR (pwsrc, RESOURCE, FAILED, ("error starting mainloop"), (NULL));
     return FALSE;
   }
-no_remote:
-  {
-    GST_ELEMENT_ERROR (pwsrc, RESOURCE, FAILED, ("can't create remote"), (NULL));
-    pw_thread_loop_unlock (pwsrc->main_loop);
-    return FALSE;
-  }
 connect_error:
   {
-    pw_thread_loop_unlock (pwsrc->main_loop);
+    GST_ELEMENT_ERROR (pwsrc, RESOURCE, FAILED, ("can't connect"), (NULL));
+    pw_thread_loop_unlock (pwsrc->loop);
     return FALSE;
   }
 no_stream:
   {
     GST_ELEMENT_ERROR (pwsrc, RESOURCE, FAILED, ("can't create stream"), (NULL));
-    pw_thread_loop_unlock (pwsrc->main_loop);
+    pw_thread_loop_unlock (pwsrc->loop);
     return FALSE;
   }
 }
@@ -1053,7 +996,7 @@ gst_pipewire_src_close (GstPipeWireSrc * pwsrc)
 {
   clear_queue (pwsrc);
 
-  pw_thread_loop_stop (pwsrc->main_loop);
+  pw_thread_loop_stop (pwsrc->loop);
 
   pwsrc->last_time = gst_clock_get_time (pwsrc->clock);
 
@@ -1068,8 +1011,8 @@ gst_pipewire_src_close (GstPipeWireSrc * pwsrc)
   pw_stream_destroy (pwsrc->stream);
   pwsrc->stream = NULL;
 
-  pw_remote_destroy (pwsrc->remote);
-  pwsrc->remote = NULL;
+  pw_core_disconnect (pwsrc->core);
+  pwsrc->core = NULL;
 }
 
 static GstStateChangeReturn

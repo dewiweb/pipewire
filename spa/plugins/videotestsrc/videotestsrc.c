@@ -36,6 +36,7 @@
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
 #include <spa/node/io.h>
+#include <spa/node/keys.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/param/param.h>
 #include <spa/pod/filter.h>
@@ -50,7 +51,7 @@ enum pattern {
 	PATTERN_SNOW,
 };
 
-#define DEFAULT_LIVE false
+#define DEFAULT_LIVE true
 #define DEFAULT_PATTERN PATTERN_SMPTE_SNOW
 
 struct props {
@@ -377,15 +378,10 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 		set_timer(this, true);
 		break;
 	}
+	case SPA_NODE_COMMAND_Suspend:
 	case SPA_NODE_COMMAND_Pause:
-		if (!port->have_format)
-			return -EIO;
-		if (port->n_buffers == 0)
-			return -EIO;
-
 		if (!this->started)
 			return 0;
-
 		this->started = false;
 		set_timer(this, false);
 		break;
@@ -397,6 +393,7 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 
 static const struct spa_dict_item node_info_items[] = {
 	{ SPA_KEY_MEDIA_CLASS, "Video/Source" },
+	{ SPA_KEY_NODE_DRIVER, "true" },
 };
 
 static void emit_node_info(struct impl *this, bool full)
@@ -575,6 +572,18 @@ impl_node_port_enum_params(void *object, int seq,
 			return 0;
 		}
 		break;
+	case SPA_PARAM_IO:
+		switch (result.index) {
+		case 0:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamIO, id,
+				SPA_PARAM_IO_id,   SPA_POD_Id(SPA_IO_Buffers),
+				SPA_PARAM_IO_size, SPA_POD_Int(sizeof(struct spa_io_buffers)));
+			break;
+		default:
+			return 0;
+		}
+		break;
 	default:
 		return -ENOENT;
 	}
@@ -727,11 +736,13 @@ impl_node_port_set_io(void *object,
 	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
 	port = &this->port;
 
-	if (id == SPA_IO_Buffers)
+	switch (id) {
+	case SPA_IO_Buffers:
 		port->io = data;
-	else
+		break;
+	default:
 		return -ENOENT;
-
+	}
 	return 0;
 }
 
@@ -784,7 +795,7 @@ static int impl_node_process(void *object)
 		io->buffer_id = SPA_ID_INVALID;
 	}
 
-	if (!this->props.live && (io->status == SPA_STATUS_NEED_DATA))
+	if (!this->props.live)
 		return make_buffer(this);
 	else
 		return SPA_STATUS_OK;
@@ -808,7 +819,7 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
 
@@ -817,7 +828,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct impl *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Node)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -856,7 +867,6 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	struct port *port;
-	uint32_t i;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -866,19 +876,9 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct impl *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataLoop:
-			this->data_loop = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataSystem:
-			this->data_system = support[i].data;
-			break;
-		}
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
+	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
 
 	spa_hook_list_init(&this->hooks);
 

@@ -39,6 +39,7 @@
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
 #include <spa/node/io.h>
+#include <spa/node/keys.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/param.h>
 #include <spa/pod/filter.h>
@@ -147,8 +148,8 @@ static int impl_node_enum_params(void *object, int seq,
 	case SPA_PARAM_Format:
 		switch (result.index) {
 		case 0:
-			param = spa_format_audio_raw_build(&b,
-					id, &this->current_format.info.raw);
+			param = spa_format_audio_dsp_build(&b,
+					id, &this->current_format.info.dsp);
 			break;
 		default:
 			return 0;
@@ -445,11 +446,8 @@ static int init_ports(struct impl *this)
 	}
 	this->n_out_ports = i;
 
-	this->current_format.info.raw = SPA_AUDIO_INFO_RAW_INIT(
-			.format = SPA_AUDIO_FORMAT_F32P,
-			.flags = SPA_AUDIO_FLAG_UNPOSITIONED,
-			.rate = jack_get_sample_rate(client),
-			.channels = this->n_out_ports);
+	this->current_format.info.dsp = SPA_AUDIO_INFO_DSP_INIT(
+			.format = SPA_AUDIO_FORMAT_DSP_F32);
 
 	spa_jack_client_add_listener(this->client,
 			&this->client_listener,
@@ -497,10 +495,8 @@ static int port_enum_formats(struct impl *this,
 		*param = spa_pod_builder_add_object(builder,
 			SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 			SPA_FORMAT_mediaType,       SPA_POD_Id(SPA_MEDIA_TYPE_audio),
-			SPA_FORMAT_mediaSubtype,    SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-			SPA_FORMAT_AUDIO_format,    SPA_POD_Id(SPA_AUDIO_FORMAT_F32P),
-			SPA_FORMAT_AUDIO_rate,      SPA_POD_Int(this->client->frame_rate),
-			SPA_FORMAT_AUDIO_channels,  SPA_POD_Int(1));
+			SPA_FORMAT_mediaSubtype,    SPA_POD_Id(SPA_MEDIA_SUBTYPE_dsp),
+			SPA_FORMAT_AUDIO_format,    SPA_POD_Id(SPA_AUDIO_FORMAT_DSP_F32));
 		break;
 	default:
 		return 0;
@@ -550,7 +546,7 @@ impl_node_port_enum_params(void *object, int seq,
 		if (result.index > 0)
 			return 0;
 
-		param = spa_format_audio_raw_build(&b, id, &port->current_format.info.raw);
+		param = spa_format_audio_dsp_build(&b, id, &port->current_format.info.dsp);
 		break;
 
 	case SPA_PARAM_Buffers:
@@ -626,17 +622,16 @@ static int port_set_format(struct impl *this, struct port *port,
 			return res;
 
 		if (info.media_type != SPA_MEDIA_TYPE_audio &&
-		    info.media_subtype != SPA_MEDIA_SUBTYPE_raw)
+		    info.media_subtype != SPA_MEDIA_SUBTYPE_dsp)
 			return -EINVAL;
 
-		if (spa_format_audio_raw_parse(format, &info.info.raw) < 0)
+		if (spa_format_audio_dsp_parse(format, &info.info.dsp) < 0)
 			return -EINVAL;
 
-		if (info.info.raw.format == SPA_AUDIO_FORMAT_F32P)
-			port->stride = 4;
-		else
+		if (info.info.dsp.format != SPA_AUDIO_FORMAT_DSP_F32)
 			return -EINVAL;
 
+		port->stride = 4;
 		port->current_format = info;
 		port->have_format = true;
 	}
@@ -822,7 +817,7 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
 
@@ -831,7 +826,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct impl *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Node)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -859,7 +854,7 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct impl *this;
-	uint32_t i;
+	const char *str;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -869,15 +864,11 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct impl *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		if (support[i].type == SPA_TYPE_INTERFACE_Log)
-			this->log = support[i].data;
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 
-	for (i = 0; info && i < info->n_items; i++) {
-		if (strcmp(info->items[i].key, SPA_KEY_API_JACK_CLIENT) == 0)
-			sscanf(info->items[i].value, "pointer:%p", &this->client);
-	}
+	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_JACK_CLIENT)))
+		sscanf(str, "pointer:%p", &this->client);
+
 	if (this->client == NULL) {
 		spa_log_error(this->log, NAME" %p: missing "SPA_KEY_API_JACK_CLIENT
 				" property", this);

@@ -39,18 +39,21 @@ extern "C" {
 #define SPA_TYPE_INFO_PARAM_ID_BASE	SPA_TYPE_INFO_ParamId ":"
 
 static const struct spa_type_info spa_type_param[] = {
-	{ SPA_PARAM_Invalid, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ID_BASE "Invalid", NULL },
-	{ SPA_PARAM_PropInfo, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ID_BASE "PropInfo", NULL },
-	{ SPA_PARAM_Props, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ID_BASE "Props", NULL },
-	{ SPA_PARAM_EnumFormat, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ID_BASE "EnumFormat", NULL },
-	{ SPA_PARAM_Format, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ID_BASE "Format", NULL },
-	{ SPA_PARAM_Buffers, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ID_BASE "Buffers", NULL },
-	{ SPA_PARAM_Meta, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ID_BASE "Meta", NULL },
-	{ SPA_PARAM_IO, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ID_BASE "IO", NULL },
-	{ SPA_PARAM_EnumProfile, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ID_BASE "EnumProfile", NULL },
-	{ SPA_PARAM_Profile, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ID_BASE "Profile", NULL },
-	{ SPA_PARAM_EnumPortConfig, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ID_BASE "EnumPortConfig", NULL },
-	{ SPA_PARAM_PortConfig, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ID_BASE "PortConfig", NULL },
+	{ SPA_PARAM_Invalid, SPA_TYPE_None, SPA_TYPE_INFO_PARAM_ID_BASE "Invalid", NULL },
+	{ SPA_PARAM_PropInfo, SPA_TYPE_OBJECT_Props, SPA_TYPE_INFO_PARAM_ID_BASE "PropInfo", NULL },
+	{ SPA_PARAM_Props, SPA_TYPE_OBJECT_Props, SPA_TYPE_INFO_PARAM_ID_BASE "Props", NULL },
+	{ SPA_PARAM_EnumFormat, SPA_TYPE_OBJECT_Format, SPA_TYPE_INFO_PARAM_ID_BASE "EnumFormat", NULL },
+	{ SPA_PARAM_Format, SPA_TYPE_OBJECT_Format, SPA_TYPE_INFO_PARAM_ID_BASE "Format", NULL },
+	{ SPA_PARAM_Buffers, SPA_TYPE_OBJECT_ParamBuffers, SPA_TYPE_INFO_PARAM_ID_BASE "Buffers", NULL },
+	{ SPA_PARAM_Meta, SPA_TYPE_OBJECT_ParamMeta, SPA_TYPE_INFO_PARAM_ID_BASE "Meta", NULL },
+	{ SPA_PARAM_IO, SPA_TYPE_OBJECT_ParamIO, SPA_TYPE_INFO_PARAM_ID_BASE "IO", NULL },
+	{ SPA_PARAM_EnumProfile, SPA_TYPE_OBJECT_ParamProfile, SPA_TYPE_INFO_PARAM_ID_BASE "EnumProfile", NULL },
+	{ SPA_PARAM_Profile, SPA_TYPE_OBJECT_ParamProfile, SPA_TYPE_INFO_PARAM_ID_BASE "Profile", NULL },
+	{ SPA_PARAM_EnumPortConfig, SPA_TYPE_OBJECT_ParamPortConfig, SPA_TYPE_INFO_PARAM_ID_BASE "EnumPortConfig", NULL },
+	{ SPA_PARAM_PortConfig, SPA_TYPE_OBJECT_ParamPortConfig, SPA_TYPE_INFO_PARAM_ID_BASE "PortConfig", NULL },
+	{ SPA_PARAM_EnumRoute, SPA_TYPE_OBJECT_ParamRoute, SPA_TYPE_INFO_PARAM_ID_BASE "EnumRoute", NULL },
+	{ SPA_PARAM_Route, SPA_TYPE_OBJECT_ParamRoute, SPA_TYPE_INFO_PARAM_ID_BASE "Route", NULL },
+	{ SPA_PARAM_Control, SPA_TYPE_Sequence, SPA_TYPE_INFO_PARAM_ID_BASE "Control", NULL },
 	{ 0, 0, NULL, NULL },
 };
 
@@ -76,6 +79,7 @@ static const struct spa_type_info spa_type_props[] = {
 	{ SPA_PROP_periodEvent, SPA_TYPE_Bool, SPA_TYPE_INFO_PROPS_BASE "periodEvent", NULL },
 	{ SPA_PROP_live, SPA_TYPE_Bool, SPA_TYPE_INFO_PROPS_BASE "live", NULL },
 	{ SPA_PROP_rate, SPA_TYPE_Double, SPA_TYPE_INFO_PROPS_BASE "rate", NULL },
+	{ SPA_PROP_quality, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "quality", NULL },
 
 	{ SPA_PROP_waveType, SPA_TYPE_Id, SPA_TYPE_INFO_PROPS_BASE "waveType", NULL },
 	{ SPA_PROP_frequency, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "frequency", NULL },
@@ -225,6 +229,7 @@ static const struct spa_type_info spa_type_format[] = {
 
 	{ SPA_FORMAT_VIDEO_format, SPA_TYPE_Id, SPA_TYPE_INFO_FORMAT_VIDEO_BASE "format",
 		spa_type_video_format, },
+	{ SPA_FORMAT_VIDEO_modifier, SPA_TYPE_Long, SPA_TYPE_INFO_FORMAT_VIDEO_BASE "modifier", NULL },
 	{ SPA_FORMAT_VIDEO_size,  SPA_TYPE_Rectangle, SPA_TYPE_INFO_FORMAT_VIDEO_BASE "size", NULL },
 	{ SPA_FORMAT_VIDEO_framerate, SPA_TYPE_Fraction, SPA_TYPE_INFO_FORMAT_VIDEO_BASE "framerate", NULL },
 	{ SPA_FORMAT_VIDEO_maxFramerate, SPA_TYPE_Fraction, SPA_TYPE_INFO_FORMAT_VIDEO_BASE "maxFramerate", NULL },
@@ -253,12 +258,13 @@ static const struct spa_type_info spa_type_format[] = {
 #define SPA_TYPE_INFO_PARAM_BLOCK_INFO_BASE		SPA_TYPE_INFO_PARAM_BlockInfo ":"
 
 static const struct spa_type_info spa_type_param_buffers[] = {
-	{ SPA_PARAM_BUFFERS_START,   SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_BUFFERS_BASE, spa_type_param, },
-	{ SPA_PARAM_BUFFERS_buffers, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_BUFFERS_BASE "buffers", NULL },
-	{ SPA_PARAM_BUFFERS_blocks,  SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_BUFFERS_BASE "blocks", NULL },
-	{ SPA_PARAM_BUFFERS_size,    SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_BLOCK_INFO_BASE "size", NULL },
-	{ SPA_PARAM_BUFFERS_stride,  SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_BLOCK_INFO_BASE "stride", NULL },
-	{ SPA_PARAM_BUFFERS_align,   SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_BLOCK_INFO_BASE "align", NULL },
+	{ SPA_PARAM_BUFFERS_START,    SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_BUFFERS_BASE, spa_type_param, },
+	{ SPA_PARAM_BUFFERS_buffers,  SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_BUFFERS_BASE "buffers", NULL },
+	{ SPA_PARAM_BUFFERS_blocks,   SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_BUFFERS_BASE "blocks", NULL },
+	{ SPA_PARAM_BUFFERS_size,     SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_BLOCK_INFO_BASE "size", NULL },
+	{ SPA_PARAM_BUFFERS_stride,   SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_BLOCK_INFO_BASE "stride", NULL },
+	{ SPA_PARAM_BUFFERS_align,    SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_BLOCK_INFO_BASE "align", NULL },
+	{ SPA_PARAM_BUFFERS_dataType, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_BLOCK_INFO_BASE "dataType", NULL },
 	{ 0, 0, NULL, NULL },
 };
 
@@ -269,6 +275,8 @@ static const struct spa_type_info spa_type_param_profile[] = {
 	{ SPA_PARAM_PROFILE_START, SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_PROFILE_BASE, spa_type_param, },
 	{ SPA_PARAM_PROFILE_index, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_PROFILE_BASE "index", NULL },
 	{ SPA_PARAM_PROFILE_name, SPA_TYPE_String, SPA_TYPE_INFO_PARAM_PROFILE_BASE "name", NULL },
+	{ SPA_PARAM_PROFILE_description, SPA_TYPE_String, SPA_TYPE_INFO_PARAM_PROFILE_BASE "description", NULL },
+	{ SPA_PARAM_PROFILE_priority, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_PROFILE_BASE "priority", NULL },
 	{ 0, 0, NULL, NULL },
 };
 
@@ -291,9 +299,49 @@ static const struct spa_type_info spa_type_param_port_config[] = {
 	{ SPA_PARAM_PORT_CONFIG_direction, SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_PORT_CONFIG_BASE "direction", spa_type_direction, },
 	{ SPA_PARAM_PORT_CONFIG_mode, SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_PORT_CONFIG_BASE "mode", spa_type_param_port_config_mode },
 	{ SPA_PARAM_PORT_CONFIG_monitor, SPA_TYPE_Bool, SPA_TYPE_INFO_PARAM_PORT_CONFIG_BASE "monitor", NULL },
+	{ SPA_PARAM_PORT_CONFIG_control, SPA_TYPE_Bool, SPA_TYPE_INFO_PARAM_PORT_CONFIG_BASE "control", NULL },
 	{ SPA_PARAM_PORT_CONFIG_format, SPA_TYPE_Object, SPA_TYPE_INFO_PARAM_PORT_CONFIG_BASE "format", NULL },
 	{ 0, 0, NULL, NULL },
 };
+
+#define SPA_TYPE_INFO_ParamRouteAvailability		SPA_TYPE_INFO_ENUM_BASE "ParamRouteAvailability"
+#define SPA_TYPE_INFO_PARAM_ROUTE_AVAILABILITY_BASE	SPA_TYPE_INFO_ParamRouteAvailability ":"
+
+static const struct spa_type_info spa_type_param_route_availability[] = {
+	{ SPA_PARAM_ROUTE_AVAILABILITY_unknown, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ROUTE_AVAILABILITY_BASE "unknown", NULL },
+	{ SPA_PARAM_ROUTE_AVAILABILITY_no, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ROUTE_AVAILABILITY_BASE "no", NULL },
+	{ SPA_PARAM_ROUTE_AVAILABILITY_yes, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ROUTE_AVAILABILITY_BASE "yes", NULL },
+	{ 0, 0, NULL, NULL },
+};
+
+
+#define SPA_TYPE_INFO_PARAM_Route		SPA_TYPE_INFO_PARAM_BASE "Route"
+#define SPA_TYPE_INFO_PARAM_ROUTE_BASE		SPA_TYPE_INFO_PARAM_Route ":"
+
+static const struct spa_type_info spa_type_param_route[] = {
+	{ SPA_PARAM_ROUTE_START, SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_ROUTE_BASE, spa_type_param, },
+	{ SPA_PARAM_ROUTE_index, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ROUTE_BASE "index", NULL, },
+	{ SPA_PARAM_ROUTE_name, SPA_TYPE_String, SPA_TYPE_INFO_PARAM_ROUTE_BASE "name", NULL, },
+	{ SPA_PARAM_ROUTE_description, SPA_TYPE_String, SPA_TYPE_INFO_PARAM_ROUTE_BASE "description", NULL, },
+	{ SPA_PARAM_ROUTE_priority, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ROUTE_BASE "priority", NULL, },
+	{ SPA_PARAM_ROUTE_available, SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_ROUTE_BASE "available", spa_type_param_route_availability, },
+	{ 0, 0, NULL, NULL },
+};
+
+#include <spa/param/profiler.h>
+
+#define SPA_TYPE_INFO_Profiler		SPA_TYPE_INFO_OBJECT_BASE "Profiler"
+#define SPA_TYPE_INFO_PROFILER_BASE	SPA_TYPE_INFO_Profiler ":"
+
+static const struct spa_type_info spa_type_profiler[] = {
+	{ SPA_PROFILER_START, SPA_TYPE_Id, SPA_TYPE_INFO_PROFILER_BASE, spa_type_param, },
+	{ SPA_PROFILER_info, SPA_TYPE_Struct, SPA_TYPE_INFO_PROFILER_BASE "info", NULL, },
+	{ SPA_PROFILER_clock, SPA_TYPE_Struct, SPA_TYPE_INFO_PROFILER_BASE "clock", NULL, },
+	{ SPA_PROFILER_driverBlock, SPA_TYPE_Struct, SPA_TYPE_INFO_PROFILER_BASE "driverBlock", NULL, },
+	{ SPA_PROFILER_followerBlock, SPA_TYPE_Struct, SPA_TYPE_INFO_PROFILER_BASE "followerBlock", NULL, },
+	{ 0, 0, NULL, NULL },
+};
+
 
 #ifdef __cplusplus
 }  /* extern "C" */

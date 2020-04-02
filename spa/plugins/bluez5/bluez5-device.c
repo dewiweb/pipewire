@@ -34,10 +34,15 @@
 #include <spa/utils/type.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
+#include <spa/node/node.h>
 #include <spa/support/loop.h>
 #include <spa/support/plugin.h>
 #include <spa/monitor/device.h>
 #include <spa/monitor/utils.h>
+#include <spa/pod/filter.h>
+#include <spa/pod/parser.h>
+#include <spa/param/param.h>
+#include <spa/debug/pod.h>
 
 #include "defs.h"
 
@@ -68,10 +73,10 @@ struct impl {
 
 	struct spa_bt_device *bt_dev;
 
-	uint32_t next_id;
+	uint32_t profile;
 };
 
-static void emit_node (struct impl *this, struct spa_bt_transport *t, const char *factory_name)
+static void emit_node (struct impl *this, struct spa_bt_transport *t, uint32_t id, const char *factory_name)
 {
         struct spa_device_object_info info;
         struct spa_dict_item items[2];
@@ -87,37 +92,72 @@ static void emit_node (struct impl *this, struct spa_bt_transport *t, const char
         info.change_mask = SPA_DEVICE_OBJECT_CHANGE_MASK_PROPS;
         info.props = &SPA_DICT_INIT_ARRAY(items);
 
-        spa_device_emit_object_info(&this->hooks, this->next_id++, &info);
+        spa_device_emit_object_info(&this->hooks, id, &info);
 }
 
-static int emit_nodes(struct impl *this)
+static struct spa_bt_transport *find_transport(struct impl *this, int profile)
 {
 	struct spa_bt_device *device = this->bt_dev;
 	struct spa_bt_transport *t;
 
 	spa_list_for_each(t, &device->transport_list, device_link) {
-		if (t->profile & device->connected_profiles) {
-			switch (t->profile) {
-			case SPA_BT_PROFILE_A2DP_SOURCE:
-				emit_node (this, t, SPA_NAME_API_BLUEZ5_A2DP_SOURCE);
-				break;
-			case SPA_BT_PROFILE_A2DP_SINK:
-				emit_node (this, t, SPA_NAME_API_BLUEZ5_A2DP_SINK);
-				break;
-			case SPA_BT_PROFILE_HSP_HS:
-			case SPA_BT_PROFILE_HSP_AG:
-			case SPA_BT_PROFILE_HFP_HF:
-			case SPA_BT_PROFILE_HFP_AG:
-				emit_node (this, t, SPA_NAME_API_BLUEZ5_SCO_SOURCE);
-				emit_node (this, t, SPA_NAME_API_BLUEZ5_SCO_SINK);
-				break;
-			default:
-				return -EINVAL;
-			}
-		}
+		if (t->profile & device->connected_profiles &&
+		    (t->profile & profile) == t->profile)
+			return t;
 	}
+	return NULL;
+}
 
+static int emit_nodes(struct impl *this)
+{
+	struct spa_bt_transport *t;
+
+	t = find_transport(this, this->profile);
+	if (t == NULL)
+		return 0;
+
+	switch (this->profile) {
+	case SPA_BT_PROFILE_A2DP_SOURCE:
+		emit_node(this, t, 0, SPA_NAME_API_BLUEZ5_A2DP_SOURCE);
+		break;
+	case SPA_BT_PROFILE_A2DP_SINK:
+		emit_node(this, t, 0, SPA_NAME_API_BLUEZ5_A2DP_SINK);
+		break;
+	case SPA_BT_PROFILE_HSP_HS:
+	case SPA_BT_PROFILE_HSP_AG:
+	case SPA_BT_PROFILE_HFP_HF:
+	case SPA_BT_PROFILE_HFP_AG:
+		emit_node(this, t, 0, SPA_NAME_API_BLUEZ5_SCO_SOURCE);
+		emit_node(this, t, 1, SPA_NAME_API_BLUEZ5_SCO_SINK);
+		break;
+	default:
+		return -EINVAL;
+	}
 	return 0;
+}
+
+static int set_profile(struct impl *this, uint32_t profile)
+{
+	if (this->profile == profile)
+		return 0;
+
+	switch (this->profile) {
+	case SPA_BT_PROFILE_A2DP_SOURCE:
+	case SPA_BT_PROFILE_A2DP_SINK:
+		spa_device_emit_object_info(&this->hooks, 0, NULL);
+		break;
+	case SPA_BT_PROFILE_HSP_HS:
+	case SPA_BT_PROFILE_HSP_AG:
+	case SPA_BT_PROFILE_HFP_HF:
+	case SPA_BT_PROFILE_HFP_AG:
+		spa_device_emit_object_info(&this->hooks, 0, NULL);
+		spa_device_emit_object_info(&this->hooks, 1, NULL);
+		break;
+	default:
+		break;
+	}
+	this->profile = profile;
+	return emit_nodes(this);
 }
 
 static const struct spa_dict_item info_items[] = {
@@ -140,6 +180,7 @@ static int impl_add_listener(void *object,
 
 	if (events->info) {
 		struct spa_device_info info;
+		struct spa_param_info params[2];
 
 		info = SPA_DEVICE_INFO_INIT();
 
@@ -147,8 +188,10 @@ static int impl_add_listener(void *object,
 		info.props = &SPA_DICT_INIT_ARRAY(info_items);
 
 		info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
-		info.n_params = 0;
-		info.params = NULL;
+		params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumProfile, SPA_PARAM_INFO_READ);
+		params[1] = SPA_PARAM_INFO(SPA_PARAM_Profile, SPA_PARAM_INFO_READWRITE);
+		info.n_params = SPA_N_ELEMENTS(params);
+		info.params = params;
 
 		spa_device_emit_info(&this->hooks, &info);
 	}
@@ -161,29 +204,146 @@ static int impl_add_listener(void *object,
 	return 0;
 }
 
+static int impl_sync(void *object, int seq)
+{
+	struct impl *this = object;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+
+	spa_device_emit_result(&this->hooks, seq, 0, 0, NULL);
+
+	return 0;
+}
+
+static inline int maskn(int v, int n)
+{
+	int pos = 0, cnt = 0;
+	while (v) {
+		if ((v & 1) == 1 && (++cnt == n))
+			return 1 << pos;
+		v >>= 1;
+		pos++;
+	}
+	return 0;
+}
 
 static int impl_enum_params(void *object, int seq,
 			    uint32_t id, uint32_t start, uint32_t num,
 			    const struct spa_pod *filter)
 {
-	return -ENOTSUP;
+	struct impl *this = object;
+	struct spa_pod *param;
+	struct spa_pod_builder b = { 0 };
+	uint8_t buffer[1024];
+	struct spa_result_device_params result;
+	uint32_t count = 0;
+	struct spa_bt_device *device = this->bt_dev;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+	spa_return_val_if_fail(num != 0, -EINVAL);
+
+	result.id = id;
+	result.next = start;
+      next:
+	result.index = result.next++;
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+
+	switch (id) {
+	case SPA_PARAM_EnumProfile:
+	{
+		int profile;
+
+		switch (result.index) {
+		case 0:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamProfile, id,
+				SPA_PARAM_PROFILE_index,   SPA_POD_Int(0),
+				SPA_PARAM_PROFILE_name, SPA_POD_String("Off"));
+			break;
+		default:
+		{
+			profile = maskn(device->connected_profiles, result.index);
+			if (profile == 0)
+				return 0;
+
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamProfile, id,
+				SPA_PARAM_PROFILE_index,   SPA_POD_Int(profile),
+				SPA_PARAM_PROFILE_name, SPA_POD_String(spa_bt_profile_name(profile)));
+			break;
+		}
+		}
+		break;
+	}
+	case SPA_PARAM_Profile:
+	{
+		switch (result.index) {
+		case 0:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamProfile, id,
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(this->profile));
+			break;
+		default:
+			return 0;
+		}
+		break;
+	}
+	default:
+		return -ENOENT;
+	}
+
+	if (spa_pod_filter(&b, &result.param, param, filter) < 0)
+		goto next;
+
+	spa_device_emit_result(&this->hooks, seq, 0,
+			SPA_RESULT_TYPE_DEVICE_PARAMS, &result);
+
+	if (++count != num)
+		goto next;
+
+	return 0;
 }
 
 static int impl_set_param(void *object,
 			  uint32_t id, uint32_t flags,
 			  const struct spa_pod *param)
 {
-	return -ENOTSUP;
+	struct impl *this = object;
+	int res;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+
+	switch (id) {
+	case SPA_PARAM_Profile:
+	{
+		uint32_t id;
+
+		if ((res = spa_pod_parse_object(param,
+				SPA_TYPE_OBJECT_ParamProfile, NULL,
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(&id))) < 0) {
+			spa_log_warn(this->log, "can't parse profile");
+			spa_debug_pod(0, NULL, param);
+			return res;
+		}
+		set_profile(this, id);
+		break;
+	}
+	default:
+		return -ENOENT;
+	}
+	return 0;
 }
 
 static const struct spa_device_methods impl_device = {
 	SPA_VERSION_DEVICE_METHODS,
 	.add_listener = impl_add_listener,
+	.sync = impl_sync,
 	.enum_params = impl_enum_params,
 	.set_param = impl_set_param,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
 
@@ -192,7 +352,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct impl *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Device)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Device) == 0)
 		*interface = &this->device;
 	else
 		return -ENOENT;
@@ -220,7 +380,7 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct impl *this;
-	uint32_t i;
+	const char *str;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -230,18 +390,11 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct impl *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		}
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 
-	for (i = 0; info && i < info->n_items; i++) {
-		if (strcmp(info->items[i].key, SPA_KEY_API_BLUEZ5_DEVICE) == 0)
-			sscanf(info->items[i].value, "pointer:%p", &this->bt_dev);
-	}
+	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_BLUEZ5_DEVICE)))
+		sscanf(str, "pointer:%p", &this->bt_dev);
+
 	if (this->bt_dev == NULL) {
 		spa_log_error(this->log, "a device is needed");
 		return -EINVAL;
@@ -254,8 +407,6 @@ impl_init(const struct spa_handle_factory *factory,
 	spa_hook_list_init(&this->hooks);
 
 	reset_props(&this->props);
-
-	this->next_id = 0;
 
 	return 0;
 }

@@ -737,7 +737,7 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
 
@@ -746,7 +746,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct impl *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Node)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -775,7 +775,6 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	struct port *port;
-	uint32_t i;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -785,10 +784,7 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct impl *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		if (support[i].type == SPA_TYPE_INTERFACE_Log)
-			this->log = support[i].data;
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 
 	spa_hook_list_init(&this->hooks);
 
@@ -812,7 +808,7 @@ impl_init(const struct spa_handle_factory *factory,
 	port->direction = SPA_DIRECTION_INPUT;
 	port->id = 0;
 	port->info_all = SPA_PORT_CHANGE_MASK_FLAGS |
-			SPA_NODE_CHANGE_MASK_PARAMS;
+			SPA_PORT_CHANGE_MASK_PARAMS;
 	port->info = SPA_PORT_INFO_INIT();
 	port->info.flags = SPA_PORT_FLAG_IN_PLACE;
 	port->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
@@ -828,7 +824,7 @@ impl_init(const struct spa_handle_factory *factory,
 	port->direction = SPA_DIRECTION_OUTPUT;
 	port->id = 0;
 	port->info_all = SPA_PORT_CHANGE_MASK_FLAGS |
-			SPA_NODE_CHANGE_MASK_PARAMS;
+			SPA_PORT_CHANGE_MASK_PARAMS;
 	port->info = SPA_PORT_INFO_INIT();
 	port->info.flags = SPA_PORT_FLAG_NO_REF;
 	port->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);

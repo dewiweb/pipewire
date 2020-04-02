@@ -29,79 +29,134 @@
 extern "C" {
 #endif
 
-/** \class pw_device
- *
- * \brief PipeWire device interface.
- *
- * The device is an object that manages nodes. It typically
- * corresponds to a physical hardware device but it does not
- * have to be.
- *
- * The purpose of the device is to provide an interface to
- * dynamically create/remove/configure the nodes it manages.
- */
+#include <spa/utils/defs.h>
+#include <spa/utils/hook.h>
+
+#include <pipewire/proxy.h>
+
+#define PW_TYPE_INTERFACE_Device	PW_TYPE_INFO_INTERFACE_BASE "Device"
+
+#define PW_VERSION_DEVICE		3
 struct pw_device;
 
-#include <spa/monitor/device.h>
+/** The device information. Extra information can be added in later versions \memberof pw_introspect */
+struct pw_device_info {
+	uint32_t id;			/**< id of the global */
+#define PW_DEVICE_CHANGE_MASK_PROPS	(1 << 0)
+#define PW_DEVICE_CHANGE_MASK_PARAMS	(1 << 1)
+#define PW_DEVICE_CHANGE_MASK_ALL	((1 << 2)-1)
+	uint64_t change_mask;		/**< bitfield of changed fields since last call */
+	struct spa_dict *props;		/**< extra properties */
+	struct spa_param_info *params;	/**< parameters */
+	uint32_t n_params;		/**< number of items in \a params */
+};
 
-#include <pipewire/core.h>
-#include <pipewire/global.h>
-#include <pipewire/properties.h>
-#include <pipewire/resource.h>
+/** Update and existing \ref pw_device_info with \a update \memberof pw_introspect */
+struct pw_device_info *
+pw_device_info_update(struct pw_device_info *info,
+		      const struct pw_device_info *update);
 
-/** Device events, listen to them with \ref pw_device_add_listener */
+/** Free a \ref pw_device_info \memberof pw_introspect */
+void pw_device_info_free(struct pw_device_info *info);
+
+#define PW_DEVICE_EVENT_INFO	0
+#define PW_DEVICE_EVENT_PARAM	1
+#define PW_DEVICE_EVENT_NUM	2
+
+/** Device events */
 struct pw_device_events {
 #define PW_VERSION_DEVICE_EVENTS	0
 	uint32_t version;
-
-	/** the device is destroyed */
-        void (*destroy) (void *data);
-	/** the device is freed */
-        void (*free) (void *data);
-
-	/** the device info changed */
-	void (*info_changed) (void *data, const struct pw_device_info *info);
+	/**
+	 * Notify device info
+	 *
+	 * \param info info about the device
+	 */
+	void (*info) (void *object, const struct pw_device_info *info);
+	/**
+	 * Notify a device param
+	 *
+	 * Event emited as a result of the enum_params method.
+	 *
+	 * \param seq the sequence number of the request
+	 * \param id the param id
+	 * \param index the param index
+	 * \param next the param index of the next param
+	 * \param param the parameter
+	 */
+	void (*param) (void *object, int seq,
+		      uint32_t id, uint32_t index, uint32_t next,
+		      const struct spa_pod *param);
 };
 
-struct pw_device *pw_device_new(struct pw_core *core,
-				struct pw_properties *properties,
-				size_t user_data_size);
 
-int pw_device_register(struct pw_device *device,
-		       struct pw_properties *properties);
+#define PW_DEVICE_METHOD_ADD_LISTENER		0
+#define PW_DEVICE_METHOD_SUBSCRIBE_PARAMS	1
+#define PW_DEVICE_METHOD_ENUM_PARAMS		2
+#define PW_DEVICE_METHOD_SET_PARAM		3
+#define PW_DEVICE_METHOD_NUM			4
 
-void pw_device_destroy(struct pw_device *device);
+/** Device methods */
+struct pw_device_methods {
+#define PW_VERSION_DEVICE_METHODS	0
+	uint32_t version;
 
-void *pw_device_get_user_data(struct pw_device *device);
+	int (*add_listener) (void *object,
+			struct spa_hook *listener,
+			const struct pw_device_events *events,
+			void *data);
+	/**
+	 * Subscribe to parameter changes
+	 *
+	 * Automatically emit param events for the given ids when
+	 * they are changed.
+	 *
+	 * \param ids an array of param ids
+	 * \param n_ids the number of ids in \a ids
+	 */
+	int (*subscribe_params) (void *object, uint32_t *ids, uint32_t n_ids);
 
-/** Set the device implementation */
-int pw_device_set_implementation(struct pw_device *device, struct spa_device *spa_device);
-/** Get the device implementation */
-struct spa_device *pw_device_get_implementation(struct pw_device *device);
+	/**
+	 * Enumerate device parameters
+	 *
+	 * Start enumeration of device parameters. For each param, a
+	 * param event will be emited.
+	 *
+	 * \param seq a sequence number to place in the reply
+	 * \param id the parameter id to enum or PW_ID_ANY for all
+	 * \param start the start index or 0 for the first param
+	 * \param num the maximum number of params to retrieve
+	 * \param filter a param filter or NULL
+	 */
+	int (*enum_params) (void *object, int seq, uint32_t id, uint32_t start, uint32_t num,
+			    const struct spa_pod *filter);
+	/**
+	 * Set a parameter on the device
+	 *
+	 * \param id the parameter id to set
+	 * \param flags extra parameter flags
+	 * \param param the parameter to set
+	 */
+	int (*set_param) (void *object, uint32_t id, uint32_t flags,
+			  const struct spa_pod *param);
+};
 
-/** Get the global of this device */
-struct pw_global *pw_device_get_global(struct pw_device *device);
+#define pw_device_method(o,method,version,...)				\
+({									\
+	int _res = -ENOTSUP;						\
+	spa_interface_call_res((struct spa_interface*)o,		\
+			struct pw_device_methods, _res,			\
+			method, version, ##__VA_ARGS__);		\
+	_res;								\
+})
 
-/** Add an event listener */
-void pw_device_add_listener(struct pw_device *device,
-			    struct spa_hook *listener,
-			    const struct pw_device_events *events,
-			    void *data);
+#define pw_device_add_listener(c,...)		pw_device_method(c,add_listener,0,__VA_ARGS__)
+#define pw_device_subscribe_params(c,...)	pw_device_method(c,subscribe_params,0,__VA_ARGS__)
+#define pw_device_enum_params(c,...)		pw_device_method(c,enum_params,0,__VA_ARGS__)
+#define pw_device_set_param(c,...)		pw_device_method(c,set_param,0,__VA_ARGS__)
 
-int pw_device_update_properties(struct pw_device *device, const struct spa_dict *dict);
-
-const struct pw_properties *pw_device_get_properties(struct pw_device *device);
-
-int pw_device_for_each_param(struct pw_device *device,
-			     int seq, uint32_t param_id,
-			     uint32_t index, uint32_t max,
-			     const struct spa_pod *filter,
-			     int (*callback) (void *data, int seq,
-					      uint32_t id, uint32_t index, uint32_t next,
-					      struct spa_pod *param),
-			     void *data);
 #ifdef __cplusplus
-}
+}  /* extern "C" */
 #endif
 
 #endif /* PIPEWIRE_DEVICE_H */

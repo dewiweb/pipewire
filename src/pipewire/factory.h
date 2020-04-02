@@ -29,84 +29,81 @@
 extern "C" {
 #endif
 
-/** \class pw_factory
- *
- * \brief PipeWire factory interface.
- *
- * The factory is used to make objects on demand.
- */
+#include <stdarg.h>
+#include <errno.h>
+
+#include <spa/utils/defs.h>
+#include <spa/utils/hook.h>
+
+#include <pipewire/proxy.h>
+
+#define PW_TYPE_INTERFACE_Factory	PW_TYPE_INFO_INTERFACE_BASE "Factory"
+
+#define PW_VERSION_FACTORY		3
 struct pw_factory;
 
-#include <pipewire/core.h>
-#include <pipewire/client.h>
-#include <pipewire/global.h>
-#include <pipewire/properties.h>
-#include <pipewire/resource.h>
+/** The factory information. Extra information can be added in later versions \memberof pw_introspect */
+struct pw_factory_info {
+	uint32_t id;			/**< id of the global */
+	const char *name;		/**< name the factory */
+	const char *type;		/**< type of the objects created by this factory */
+	uint32_t version;		/**< version of the objects */
+#define PW_FACTORY_CHANGE_MASK_PROPS	(1 << 0)
+#define PW_FACTORY_CHANGE_MASK_ALL	((1 << 1)-1)
+	uint64_t change_mask;		/**< bitfield of changed fields since last call */
+	struct spa_dict *props;		/**< the properties of the factory */
+};
 
-/** Factory events, listen to them with \ref pw_factory_add_listener */
+struct pw_factory_info *
+pw_factory_info_update(struct pw_factory_info *info,
+		       const struct pw_factory_info *update);
+
+void
+pw_factory_info_free(struct pw_factory_info *info);
+
+
+#define PW_FACTORY_EVENT_INFO		0
+#define PW_FACTORY_EVENT_NUM		1
+
+/** Factory events */
 struct pw_factory_events {
 #define PW_VERSION_FACTORY_EVENTS	0
 	uint32_t version;
-
-	/** the factory is destroyed */
-        void (*destroy) (void *data);
+	/**
+	 * Notify factory info
+	 *
+	 * \param info info about the factory
+	 */
+	void (*info) (void *object, const struct pw_factory_info *info);
 };
 
-struct pw_factory_implementation {
-#define PW_VERSION_FACTORY_IMPLEMENTATION	0
+#define PW_FACTORY_METHOD_ADD_LISTENER	0
+#define PW_FACTORY_METHOD_NUM		1
+
+/** Factory methods */
+struct pw_factory_methods {
+#define PW_VERSION_FACTORY_METHODS	0
 	uint32_t version;
 
-	/** The function to create an object from this factory */
-	void *(*create_object) (void *data,
-				struct pw_resource *resource,
-				uint32_t type,
-				uint32_t version,
-				struct pw_properties *properties,
-				uint32_t new_id);
+	int (*add_listener) (void *object,
+			struct spa_hook *listener,
+			const struct pw_factory_events *events,
+			void *data);
 };
 
-struct pw_factory *pw_factory_new(struct pw_core *core,
-				  const char *name,
-				  uint32_t type,
-				  uint32_t version,
-				  struct pw_properties *properties,
-				  size_t user_data_size);
+#define pw_factory_method(o,method,version,...)				\
+({									\
+	int _res = -ENOTSUP;						\
+	spa_interface_call_res((struct spa_interface*)o,		\
+			struct pw_factory_methods, _res,		\
+			method, version, ##__VA_ARGS__);		\
+	_res;								\
+})
 
-/** Get the factory properties */
-const struct pw_properties *pw_factory_get_properties(struct pw_factory *factory);
-
-/** Update the factory properties */
-int pw_factory_update_properties(struct pw_factory *factory, const struct spa_dict *dict);
-
-int pw_factory_register(struct pw_factory *factory,
-			struct pw_properties *properties);
-
-void pw_factory_destroy(struct pw_factory *factory);
-
-void *pw_factory_get_user_data(struct pw_factory *factory);
-
-/** Get the global of this factory */
-struct pw_global *pw_factory_get_global(struct pw_factory *factory);
-
-/** Add an event listener */
-void pw_factory_add_listener(struct pw_factory *factory,
-			     struct spa_hook *listener,
-			     const struct pw_factory_events *events,
-			     void *data);
-
-void pw_factory_set_implementation(struct pw_factory *factory,
-				   const struct pw_factory_implementation *implementation,
-				   void *data);
-
-void *pw_factory_create_object(struct pw_factory *factory,
-			       struct pw_resource *resource,
-			       uint32_t type,
-			       uint32_t version,
-			       struct pw_properties *properties,
-			       uint32_t new_id);
+#define pw_factory_add_listener(c,...)	pw_factory_method(c,add_listener,0,__VA_ARGS__)
 
 #ifdef __cplusplus
-}
+}  /* extern "C" */
 #endif
 
 #endif /* PIPEWIRE_FACTORY_H */

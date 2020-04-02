@@ -83,23 +83,20 @@ struct _GstPipeWireDeviceProvider {
 
   gchar *client_name;
 
-  struct pw_loop *loop;
-  struct pw_thread_loop *main_loop;
+  struct pw_thread_loop *loop;
+
+  struct pw_context *context;
 
   struct pw_core *core;
-
-  struct pw_remote *remote;
-  struct spa_hook remote_listener;
-
-  struct pw_core_proxy *core_proxy;
   struct spa_list pending;
   int seq;
 
-  struct pw_registry_proxy *registry;
+  struct pw_registry *registry;
 
+  int error;
   gboolean end;
   gboolean list_only;
-  GList **devices;
+  GList *devices;
 };
 
 struct _GstPipeWireDeviceProviderClass {

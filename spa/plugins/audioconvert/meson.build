@@ -74,6 +74,28 @@ if have_avx and have_fma
 	simd_cargs += ['-DHAVE_AVX', '-DHAVE_FMA']
 	simd_dependencies += audioconvert_avx
 endif
+if have_avx2
+	audioconvert_avx2 = static_library('audioconvert_avx2',
+		['fmt-ops-avx2.c'],
+		c_args : [avx2_args, '-O3', '-DHAVE_AVX2'],
+		include_directories : [spa_inc],
+		install : false
+	)
+	simd_cargs += ['-DHAVE_AVX2']
+	simd_dependencies += audioconvert_avx2
+endif
+
+if have_neon
+	audioconvert_neon = static_library('audioconvert_neon',
+		['resample-native-neon.c',
+		 'fmt-ops-neon.c' ],
+		c_args : ['-O3', '-DHAVE_NEON'],
+		include_directories : [spa_inc],
+		install : false
+	)
+	simd_cargs += ['-DHAVE_NEON']
+	simd_dependencies += audioconvert_neon
+endif
 
 audioconvertlib = shared_library('spa-audioconvert',
                           audioconvert_sources,
@@ -82,7 +104,7 @@ audioconvertlib = shared_library('spa-audioconvert',
                           dependencies : [ mathlib ],
 			  link_with : simd_dependencies,
                           install : true,
-                          install_dir : '@0@/spa/audioconvert/'.format(get_option('libdir')))
+                          install_dir : join_paths(spa_plugindir, 'audioconvert'))
 
 test_lib = static_library('test_lib',
 	['test-source.c' ],
@@ -105,7 +127,7 @@ foreach a : test_apps
 		dependencies : [dl_lib, pthread_lib, mathlib ],
 		include_directories : [spa_inc ],
 		link_with : [ simd_dependencies, test_lib, audioconvertlib ],
-		c_args : [ '-D_GNU_SOURCE' ],
+		c_args : [ simd_cargs, '-D_GNU_SOURCE' ],
 		install : false),
 	env : [
 		'SPA_PLUGIN_DIR=@0@/spa/plugins/'.format(meson.build_root()),
@@ -129,3 +151,17 @@ foreach a : benchmark_apps
 		'SPA_PLUGIN_DIR=@0@/spa/plugins/'.format(meson.build_root()),
 	])
 endforeach
+
+if sndfile_dep.found()
+  sparesample_sources = [
+    'spa-resample.c',
+  ]
+  executable('spa-resample',
+    sparesample_sources,
+    c_args : [ simd_cargs, '-D_GNU_SOURCE' ],
+    install: false,
+    include_directories : [spa_inc ],
+    link_with : [ simd_dependencies, test_lib, audioconvertlib ],
+    dependencies : [sndfile_dep, mathlib],
+  )
+endif

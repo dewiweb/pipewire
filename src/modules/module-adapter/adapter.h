@@ -25,7 +25,7 @@
 #ifndef PIPEWIRE_ADAPTER_H
 #define PIPEWIRE_ADAPTER_H
 
-#include <pipewire/node.h>
+#include <pipewire/impl.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,13 +33,13 @@ extern "C" {
 
 #define ADAPTER_USAGE	PW_KEY_NODE_NAME"=<string> "
 
-struct pw_node *
-pw_adapter_new(struct pw_core *core,
-		struct pw_node *slave,
+struct pw_impl_node *
+pw_adapter_new(struct pw_context *context,
+		struct pw_impl_node *follower,
 		struct pw_properties *properties,
 		size_t user_data_size);
 
-void *pw_adapter_get_user_data(struct pw_node *node);
+void *pw_adapter_get_user_data(struct pw_impl_node *node);
 
 #ifdef __cplusplus
 }

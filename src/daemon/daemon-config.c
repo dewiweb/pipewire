@@ -32,7 +32,6 @@
 #include <errno.h>
 
 #include <pipewire/pipewire.h>
-#include <pipewire/private.h>
 
 #include "daemon/command.h"
 #include "daemon/daemon-config.h"
@@ -65,7 +64,7 @@ out:
 	return 0;
 
 error_parse:
-	asprintf(err, "%s:%u: %s", filename, lineno, local_err);
+	*err = spa_aprintf("%s:%u: %s", filename, lineno, local_err);
 	free(local_err);
 	return -EINVAL;
 }
@@ -127,7 +126,7 @@ int pw_daemon_config_load_file(struct pw_daemon_config *config, const char *file
 	pw_log_debug("deamon-config %p: loading configuration file '%s'", config, filename);
 
 	if ((f = fopen(filename, "r")) == NULL) {
-		asprintf(err, "failed to open configuration file '%s': %s", filename,
+		*err = spa_aprintf("failed to open configuration file '%s': %s", filename,
 			 strerror(errno));
 		goto open_error;
 	}
@@ -138,8 +137,7 @@ int pw_daemon_config_load_file(struct pw_daemon_config *config, const char *file
 		if (!fgets(buf, sizeof(buf), f)) {
 			if (feof(f))
 				break;
-
-			asprintf(err, "failed to read configuration file '%s': %s",
+			*err = spa_aprintf("failed to read configuration file '%s': %s",
 				 filename, strerror(errno));
 			goto read_error;
 		}
@@ -186,22 +184,22 @@ int pw_daemon_config_load(struct pw_daemon_config *config, char **err)
 /**
  * pw_daemon_config_run_commands:
  * @config: A #struct pw_daemon_config
- * @core: A #struct pw_core
+ * @context: A #struct pw_context
  *
  * Run all commands that have been parsed. The list of commands will be cleared
  * when this function has been called.
  *
  * Returns: 0 if all commands where executed with success, otherwise < 0.
  */
-int pw_daemon_config_run_commands(struct pw_daemon_config *config, struct pw_core *core)
+int pw_daemon_config_run_commands(struct pw_daemon_config *config, struct pw_context *context)
 {
 	char *err = NULL;
 	int ret = 0;
 	struct pw_command *command;
 
 	spa_list_for_each(command, &config->commands, link) {
-		if ((ret = pw_command_run(command, core, &err)) < 0) {
-			pw_log_warn("could not run command %s: %s", command->args[0], err);
+		if ((ret = pw_command_run(command, context, &err)) < 0) {
+			pw_log_error("could not run command %s: %s", command->args[0], err);
 			free(err);
 			break;
 		}

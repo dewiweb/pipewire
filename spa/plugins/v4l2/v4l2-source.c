@@ -39,6 +39,7 @@
 #include <spa/node/node.h>
 #include <spa/node/io.h>
 #include <spa/node/utils.h>
+#include <spa/node/keys.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/param/param.h>
 #include <spa/pod/filter.h>
@@ -306,6 +307,7 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 		break;
 	}
 	case SPA_NODE_COMMAND_Pause:
+	case SPA_NODE_COMMAND_Suspend:
 		if ((res = spa_v4l2_stream_off(this)) < 0)
 			return res;
 		break;
@@ -810,7 +812,7 @@ static int process_control(struct impl *this, struct spa_pod_sequence *control)
 				if ((control_id = prop_to_control_id(prop->key)) == 0)
 					continue;
 
-				port = GET_OUT_PORT(this, prop->context);
+				port = GET_OUT_PORT(this, 0);
 				set_control(this, port, control_id,
 						SPA_POD_VALUE(struct spa_pod_float, &prop->value));
 			}
@@ -857,6 +859,7 @@ static int impl_node_process(void *object)
 
 	b = spa_list_first(&port->queue, struct buffer, link);
 	spa_list_remove(&b->link);
+	SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUTSTANDING);
 
 	spa_log_trace(this->log, NAME " %p: dequeue buffer %d", this, b->id);
 
@@ -885,7 +888,7 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
 
@@ -894,7 +897,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct impl *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Node)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -922,7 +925,6 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct impl *this;
-	uint32_t i;
 	const char *str;
 	struct port *port;
 	int res;
@@ -935,16 +937,9 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct impl *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataLoop:
-			this->data_loop = support[i].data;
-			break;
-		}
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
+
 	if (this->data_loop == NULL) {
 		spa_log_error(this->log, "a data_loop is needed");
 		return -EINVAL;

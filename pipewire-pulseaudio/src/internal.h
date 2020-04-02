@@ -33,10 +33,7 @@
 #include <pulse/introspect.h>
 #include <pulse/version.h>
 
-#include <pipewire/array.h>
-#include <pipewire/utils.h>
-#include <pipewire/interfaces.h>
-#include <pipewire/log.h>
+#include <pipewire/pipewire.h>
 
 /* Some PulseAudio API added const qualifiers in 13.0 */
 #if PA_MAJOR >= 13
@@ -54,8 +51,10 @@ extern "C" {
 #define pa_streq(a,b)		(!strcmp((a),(b)))
 #define pa_strneq(a,b,n)	(!strncmp((a),(b),(n)))
 
+#ifndef PA_LIKELY
 #define PA_UNLIKELY		SPA_UNLIKELY
 #define PA_LIKELY		SPA_LIKELY
+#endif
 #define PA_MIN			SPA_MIN
 #define PA_MAX			SPA_MAX
 #define pa_assert		spa_assert
@@ -126,7 +125,8 @@ static inline const char *pa_strnull(const char *x) {
     return x ? x : "(null)";
 }
 
-int pa_context_set_error(pa_context *c, int error);
+int pa_context_set_error(PA_CONST pa_context *c, int error);
+void pa_context_fail(PA_CONST pa_context *c, int error);
 
 #define PA_CHECK_VALIDITY(context, expression, error)			\
 do {									\
@@ -224,7 +224,7 @@ struct param {
 struct global {
 	struct spa_list link;
 	uint32_t id;
-	uint32_t type;
+	char *type;
 	struct pw_properties *props;
 
 	pa_context *context;
@@ -257,6 +257,7 @@ struct global {
 			bool mute;
 			uint32_t n_channel_volumes;
 			float channel_volumes[SPA_AUDIO_MAX_CHANNELS];
+			uint32_t device_id;
 		} node_info;
 		struct {
 			uint32_t node_id;
@@ -282,15 +283,15 @@ struct pa_context {
 	uint32_t client_index;
 
 	struct pw_loop *loop;
-	struct pw_core *core;
-	struct pw_remote *remote;
-	struct spa_hook remote_listener;
+	struct pw_context *context;
 
-	struct pw_core_proxy *core_proxy;
+	struct pw_properties *props;
+
+	struct pw_core *core;
 	struct spa_hook core_listener;
 	struct pw_core_info *core_info;
 
-        struct pw_registry_proxy *registry_proxy;
+        struct pw_registry *registry;
         struct spa_hook registry_listener;
 
 	pa_proplist *proplist;

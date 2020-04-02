@@ -338,9 +338,8 @@ static int enum_devices(struct impl *this)
 	udev_enumerate_add_match_subsystem(enumerate, "video4linux");
 	udev_enumerate_scan_devices(enumerate);
 
-	devices = udev_enumerate_get_list_entry(enumerate);
-
-	while (devices) {
+	for (devices = udev_enumerate_get_list_entry(enumerate); devices;
+			devices = udev_list_entry_get_next(devices)) {
 		struct udev_device *dev;
 		uint32_t id;
 
@@ -348,14 +347,10 @@ static int enum_devices(struct impl *this)
 		if (dev == NULL)
 			continue;
 
-		if ((id = get_device_id(this, dev)) == SPA_ID_INVALID)
-			continue;
-
-		emit_object_info(this, id, dev);
+		if ((id = get_device_id(this, dev)) != SPA_ID_INVALID)
+			emit_object_info(this, id, dev);
 
 		udev_device_unref(dev);
-
-		devices = udev_list_entry_get_next(devices);
 	}
 	udev_enumerate_unref(enumerate);
 
@@ -426,7 +421,7 @@ static const struct spa_device_methods impl_device = {
 	.add_listener = impl_device_add_listener,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
 
@@ -435,13 +430,10 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct impl *) handle;
 
-	switch (type) {
-	case SPA_TYPE_INTERFACE_Device:
+	if (strcmp(type, SPA_TYPE_INTERFACE_Device) == 0)
 		*interface = &this->device;
-		break;
-	default:
+	else
 		return -ENOENT;
-	}
 
 	return 0;
 }
@@ -469,7 +461,6 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct impl *this;
-	uint32_t i;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -479,16 +470,9 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct impl *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_Loop:
-			this->main_loop = support[i].data;
-			break;
-		}
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->main_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
+
 	if (this->main_loop == NULL) {
 		spa_log_error(this->log, "a main-loop is needed");
 		return -EINVAL;

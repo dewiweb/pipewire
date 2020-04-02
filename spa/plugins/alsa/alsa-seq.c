@@ -57,7 +57,7 @@ static int seq_open(struct seq_state *state, struct seq_conn *conn)
 			   SND_SEQ_OPEN_DUPLEX,
 			   0)) < 0) {
 		spa_log_error(state->log, "open failed: %s", snd_strerror(res));
-		goto error_exit_close;
+		return res;
 	}
 
 	/* client id */
@@ -271,7 +271,7 @@ int spa_alsa_seq_open(struct seq_state *state)
 	snd_seq_set_client_name(state->sys.hndl, "PipeWire-System");
 
 	if ((res = seq_open(state, &state->event)) < 0)
-		return res;
+		goto error_close_sys;
 
 	snd_seq_set_client_name(state->event.hndl, "PipeWire-RT-Event");
 
@@ -295,11 +295,11 @@ int spa_alsa_seq_open(struct seq_state *state)
 		spa_log_warn(state->log, "failed to connect timer port: %s", snd_strerror(res));
 	}
 
-	seq_start(state, &state->sys);
-
 	state->sys.source.func = alsa_seq_on_sys;
 	state->sys.source.data = state;
 	spa_loop_add_source(state->main_loop, &state->sys.source);
+
+	seq_start(state, &state->sys);
 
 	/* increase queue timer resolution */
 	snd_seq_queue_timer_alloca(&timer);
@@ -315,13 +315,19 @@ int spa_alsa_seq_open(struct seq_state *state)
 
 	if ((res = spa_system_timerfd_create(state->data_system,
 			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK)) < 0)
-		return res;
+		goto error_close_event;
 
 	state->timerfd = res;
 
 	state->opened = true;
 
 	return 0;
+
+error_close_event:
+	seq_close(state, &state->event);
+error_close_sys:
+	seq_close(state, &state->sys);
+	return res;
 }
 
 int spa_alsa_seq_close(struct seq_state *state)
@@ -331,6 +337,7 @@ int spa_alsa_seq_close(struct seq_state *state)
 	if (!state->opened)
 		return 0;
 
+	seq_stop(state, &state->sys);
 	spa_loop_remove_source(state->main_loop, &state->sys.source);
 
 	seq_close(state, &state->sys);
@@ -359,7 +366,7 @@ static struct seq_port *find_port(struct seq_state *state,
 		struct seq_stream *stream, const snd_seq_addr_t *addr)
 {
 	uint32_t i;
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < stream->last_port; i++) {
 		struct seq_port *port = &stream->ports[i];
 		if (port->valid &&
 		    port->addr.client == addr->client &&
@@ -367,6 +374,48 @@ static struct seq_port *find_port(struct seq_state *state,
 			return port;
 	}
 	return NULL;
+}
+
+int spa_alsa_seq_activate_port(struct seq_state *state, struct seq_port *port, bool active)
+{
+	int res;
+	snd_seq_port_subscribe_t* sub;
+
+	spa_log_debug(state->log, "activate: %d.%d: started:%d active:%d wanted:%d",
+			port->addr.client, port->addr.port, state->started, port->active, active);
+
+	if (active && !state->started)
+		return 0;
+	if (port->active == active)
+		return 0;
+
+	snd_seq_port_subscribe_alloca(&sub);
+	if (port->direction == SPA_DIRECTION_OUTPUT) {
+		snd_seq_port_subscribe_set_sender(sub, &port->addr);
+		snd_seq_port_subscribe_set_dest(sub, &state->event.addr);
+	} else {
+		snd_seq_port_subscribe_set_sender(sub, &state->event.addr);
+		snd_seq_port_subscribe_set_dest(sub, &port->addr);
+	}
+
+	if (active) {
+		snd_seq_port_subscribe_set_time_update(sub, 1);
+		snd_seq_port_subscribe_set_time_real(sub, 1);
+		snd_seq_port_subscribe_set_queue(sub, state->event.queue_id);
+		if ((res = snd_seq_subscribe_port(state->event.hndl, sub)) < 0) {
+			spa_log_error(state->log, "can't subscribe to %d:%d - %s",
+				port->addr.client, port->addr.port, snd_strerror(res));
+			active = false;
+		}
+	} else {
+		if ((res = snd_seq_unsubscribe_port(state->event.hndl, sub)) < 0) {
+			spa_log_warn(state->log, "can't unsubscribe from %d:%d - %s",
+				port->addr.client, port->addr.port, snd_strerror(res));
+		}
+	}
+	spa_log_info(state->log, "activate: %d.%d: %d", port->addr.client, port->addr.port, active);
+	port->active = active;
+	return res;
 }
 
 static struct buffer *peek_buffer(struct seq_state *state,
@@ -411,14 +460,14 @@ static int process_recycle(struct seq_state *state)
 	struct seq_stream *stream = &state->streams[SPA_DIRECTION_OUTPUT];
 	uint32_t i;
 
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < stream->last_port; i++) {
 		struct seq_port *port = &stream->ports[i];
 		struct spa_io_buffers *io = port->io;
 
 		if (!port->valid || io == NULL)
 			continue;
 
-		if (io->status == SPA_STATUS_NEED_DATA &&
+		if (io->status != SPA_STATUS_HAVE_DATA &&
 		    io->buffer_id < port->n_buffers) {
 			spa_alsa_seq_recycle_buffer(state, port, io->buffer_id);
 			io->buffer_id = SPA_ID_INVALID;
@@ -498,7 +547,7 @@ static int process_read(struct seq_state *state)
 	/* prepare a buffer on each port, some ports might have their
 	 * buffer filled above */
 	res = 0;
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < stream->last_port; i++) {
 		struct seq_port *port = &stream->ports[i];
 		struct spa_io_buffers *io = port->io;
 
@@ -550,7 +599,7 @@ static int process_write(struct seq_state *state)
 	uint32_t i;
 	int res = 0;
 
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < stream->last_port; i++) {
 		struct seq_port *port = &stream->ports[i];
 		struct spa_io_buffers *io = port->io;
 		struct buffer *buffer;
@@ -640,13 +689,20 @@ static void set_loop(struct seq_state *state, double bw)
 
 #define NSEC_TO_CLOCK(c,n) ((n) * (c)->rate.denom / ((c)->rate.num * SPA_NSEC_PER_SEC))
 
-static int update_time(struct seq_state *state, uint64_t nsec, bool slave)
+static int update_time(struct seq_state *state, uint64_t nsec, bool follower)
 {
 	snd_seq_queue_status_t *status;
 	const snd_seq_real_time_t* queue_time;
 	uint64_t queue_real;
 	double err, corr;
 	uint64_t clock_elapsed, queue_elapsed;
+
+	if (state->position) {
+		struct spa_io_clock *clock = &state->position->clock;
+		state->rate = clock->rate;
+		state->duration = clock->duration;
+		state->threshold = state->duration;
+	}
 
 	/* take queue time */
 	snd_seq_queue_status_alloca(&status);
@@ -685,13 +741,13 @@ static int update_time(struct seq_state *state, uint64_t nsec, bool slave)
 		else if (state->bw == BW_MED)
 			set_loop(state, BW_MIN);
 
-		spa_log_debug(state->log, NAME" %p: slave:%d rate:%f bw:%f err:%f (%f %f %f)",
-				state, slave, corr, state->bw, err, state->z1, state->z2, state->z3);
+		spa_log_debug(state->log, NAME" %p: follower:%d rate:%f bw:%f err:%f (%f %f %f)",
+				state, follower, corr, state->bw, err, state->z1, state->z2, state->z3);
 	}
 
 	state->next_time += state->threshold / corr * 1e9 / state->rate.denom;
 
-	if (!slave && state->clock) {
+	if (!follower && state->clock) {
 		state->clock->nsec = nsec;
 		state->clock->position += state->duration;
 		state->clock->duration = state->duration;
@@ -712,7 +768,7 @@ int spa_alsa_seq_process(struct seq_state *state)
 
 	res = process_recycle(state);
 
-	if (state->slaved) {
+	if (state->following) {
 		update_time(state, state->position->clock.nsec, true);
 		res |= process_read(state);
 	}
@@ -733,13 +789,6 @@ static void alsa_on_timeout_event(struct spa_source *source)
 	state->current_time = state->next_time;
 
 	spa_log_trace(state->log, "timeout %"PRIu64, state->current_time);
-
-	if (state->position) {
-		struct spa_io_clock *clock = &state->position->clock;
-		state->rate = clock->rate;
-		state->duration = clock->duration;
-		state->threshold = state->duration;
-	}
 
 	update_time(state, state->current_time, false);
 
@@ -767,13 +816,15 @@ static void reset_buffers(struct seq_state *this, struct seq_port *port)
 		}
 	}
 }
-static void reset_stream(struct seq_state *this, struct seq_stream *stream)
+static void reset_stream(struct seq_state *this, struct seq_stream *stream, bool active)
 {
 	uint32_t i;
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < stream->last_port; i++) {
 		struct seq_port *port = &stream->ports[i];
-		if (port->valid)
+		if (port->valid) {
 			reset_buffers(this, port);
+			spa_alsa_seq_activate_port(this, port, active);
+		}
 	}
 }
 
@@ -784,7 +835,7 @@ static int set_timers(struct seq_state *state)
 	spa_system_clock_gettime(state->data_system, CLOCK_MONOTONIC, &now);
 
 	state->next_time = SPA_TIMESPEC_TO_NSEC(&now);
-	if (state->slaved) {
+	if (state->following) {
 		set_timeout(state, 0);
 	} else {
 		set_timeout(state, state->next_time);
@@ -792,7 +843,7 @@ static int set_timers(struct seq_state *state)
 	return 0;
 }
 
-static inline bool is_slaved(struct seq_state *state)
+static inline bool is_following(struct seq_state *state)
 {
 	return state->position && state->clock && state->position->clock.id != state->clock->id;
 }
@@ -804,9 +855,9 @@ int spa_alsa_seq_start(struct seq_state *state)
 	if (state->started)
 		return 0;
 
-	state->slaved = is_slaved(state);
+	state->following = is_following(state);
 
-	spa_log_debug(state->log, "alsa %p: start slave:%d", state, state->slaved);
+	spa_log_debug(state->log, "alsa %p: start follower:%d", state, state->following);
 
 	if ((res = seq_start(state, &state->event)) < 0)
 		return res;
@@ -818,8 +869,10 @@ int spa_alsa_seq_start(struct seq_state *state)
 		state->threshold = state->duration;
 	}
 
-	reset_stream(state, &state->streams[SPA_DIRECTION_INPUT]);
-	reset_stream(state, &state->streams[SPA_DIRECTION_OUTPUT]);
+	state->started = true;
+
+	reset_stream(state, &state->streams[SPA_DIRECTION_INPUT], true);
+	reset_stream(state, &state->streams[SPA_DIRECTION_OUTPUT], true);
 
 	state->source.func = alsa_on_timeout_event;
 	state->source.data = state;
@@ -832,12 +885,10 @@ int spa_alsa_seq_start(struct seq_state *state)
 	init_loop(state);
 	set_timers(state);
 
-	state->started = true;
-
 	return 0;
 }
 
-static int do_reslave(struct spa_loop *loop,
+static int do_reassign_follower(struct spa_loop *loop,
 			    bool async,
 			    uint32_t seq,
 			    const void *data,
@@ -849,18 +900,18 @@ static int do_reslave(struct spa_loop *loop,
 	return 0;
 }
 
-int spa_alsa_seq_reslave(struct seq_state *state)
+int spa_alsa_seq_reassign_follower(struct seq_state *state)
 {
-	bool slaved;
+	bool following;
 
 	if (!state->started)
 		return 0;
 
-	slaved = is_slaved(state);
-	if (slaved != state->slaved) {
-		spa_log_debug(state->log, "alsa %p: reslave %d->%d", state, state->slaved, slaved);
-		state->slaved = slaved;
-		spa_loop_invoke(state->data_loop, do_reslave, 0, NULL, 0, true, state);
+	following = is_following(state);
+	if (following != state->following) {
+		spa_log_debug(state->log, "alsa %p: reassign follower %d->%d", state, state->following, following);
+		state->following = following;
+		spa_loop_invoke(state->data_loop, do_reassign_follower, 0, NULL, 0, true, state);
 	}
 	return 0;
 }
@@ -892,6 +943,9 @@ int spa_alsa_seq_pause(struct seq_state *state)
 	seq_stop(state, &state->event);
 
 	state->started = false;
+
+	reset_stream(state, &state->streams[SPA_DIRECTION_INPUT], false);
+	reset_stream(state, &state->streams[SPA_DIRECTION_OUTPUT], false);
 
 	return 0;
 }

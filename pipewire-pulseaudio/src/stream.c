@@ -216,13 +216,20 @@ static void configure_device(pa_stream *s)
 	pw_log_debug("stream %p: linked to %d '%s'", s, s->device_index, s->device_name);
 }
 
+static void stream_destroy(void *data)
+{
+	pa_stream *s = data;
+	s->stream = NULL;
+}
+
 static void stream_state_changed(void *data, enum pw_stream_state old,
 	enum pw_stream_state state, const char *error)
 {
 	pa_stream *s = data;
+	pa_context *c = s->context;
 
-	pw_log_debug("stream %p: state  '%s'->'%s'", s, pw_stream_state_as_string(old),
-			pw_stream_state_as_string(state));
+	pw_log_debug("stream %p: state  '%s'->'%s' (%d)", s, pw_stream_state_as_string(old),
+			pw_stream_state_as_string(state), s->state);
 
 	if (s->state == PA_STREAM_TERMINATED)
 		return;
@@ -233,7 +240,7 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 		break;
 	case PW_STREAM_STATE_UNCONNECTED:
 		if (!s->disconnecting) {
-			pa_context_set_error(s->context, PA_ERR_KILLED);
+			pa_context_set_error(c, PA_ERR_KILLED);
 			pa_stream_set_state(s, PA_STREAM_FAILED);
 		} else {
 			pa_stream_set_state(s, PA_STREAM_TERMINATED);
@@ -242,27 +249,20 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 	case PW_STREAM_STATE_CONNECTING:
 		pa_stream_set_state(s, PA_STREAM_CREATING);
 		break;
-	case PW_STREAM_STATE_CONFIGURE:
-	case PW_STREAM_STATE_READY:
-		break;
 	case PW_STREAM_STATE_PAUSED:
-		if (old < PW_STREAM_STATE_PAUSED) {
-			if (s->suspended && s->suspended_callback) {
-				s->suspended = false;
-				s->suspended_callback(s, s->suspended_userdata);
-			}
-			configure_device(s);
-			configure_buffers(s);
-			pa_stream_set_state(s, PA_STREAM_READY);
+		if (!s->suspended && !c->disconnect && s->suspended_callback) {
+			s->suspended_callback(s, s->suspended_userdata);
 		}
-		else {
-			if (!s->suspended && s->suspended_callback) {
-				s->suspended = true;
-				s->suspended_callback(s, s->suspended_userdata);
-			}
-		}
+		s->suspended = true;
 		break;
 	case PW_STREAM_STATE_STREAMING:
+		if (s->suspended && !c->disconnect && s->suspended_callback) {
+			s->suspended_callback(s, s->suspended_userdata);
+		}
+		s->suspended = false;
+		configure_device(s);
+		configure_buffers(s);
+		pa_stream_set_state(s, PA_STREAM_READY);
 		break;
 	}
 }
@@ -359,7 +359,7 @@ static void patch_buffer_attr(pa_stream *s, pa_buffer_attr *attr, pa_stream_flag
 	dump_buffer_attr(s, attr);
 }
 
-static void stream_format_changed(void *data, const struct spa_pod *format)
+static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *param)
 {
 	pa_stream *s = data;
 	const struct spa_pod *params[4];
@@ -367,28 +367,25 @@ static void stream_format_changed(void *data, const struct spa_pod *format)
         uint8_t buffer[4096];
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 	struct spa_audio_info info = { 0 };
-	int res;
 	unsigned int i;
 
-	if (format == NULL) {
-		res = 0;
-		goto done;
-	}
+	if (param == NULL || id != SPA_PARAM_Format)
+		return;
 
-	spa_format_parse(format, &info.media_type, &info.media_subtype);
+	spa_format_parse(param, &info.media_type, &info.media_subtype);
 
 	if (info.media_type != SPA_MEDIA_TYPE_audio ||
 	    info.media_subtype != SPA_MEDIA_SUBTYPE_raw ||
-	    spa_format_audio_raw_parse(format, &info.info.raw) < 0 ||
+	    spa_format_audio_raw_parse(param, &info.info.raw) < 0 ||
 	    !SPA_AUDIO_FORMAT_IS_INTERLEAVED(info.info.raw.format)) {
-		res = -EINVAL;
-		goto done;
+		pw_stream_set_error(s->stream, -EINVAL, "unhandled format");
+		return;
 	}
 
 	s->sample_spec.format = format_id2pa(s, info.info.raw.format);
 	if (s->sample_spec.format == PA_SAMPLE_INVALID) {
-		res = -EINVAL;
-		goto done;
+		pw_stream_set_error(s->stream, -EINVAL, "invalid format");
+		return;
 	}
 	s->sample_spec.rate = info.info.raw.rate;
 	s->sample_spec.channels = info.info.raw.channels;
@@ -409,16 +406,14 @@ static void stream_format_changed(void *data, const struct spa_pod *format)
 
 	params[n_params++] = get_buffers_param(s, &s->buffer_attr, &b);
 
-	res = 0;
-
-      done:
-	pw_stream_finish_format(s->stream, res, params, n_params);
+	pw_stream_update_params(s->stream, params, n_params);
 }
 
 static void stream_control_info(void *data, uint32_t id, const struct pw_stream_control *control)
 {
 	pa_stream *s = data;
 
+	pw_log_debug("stream %p: control %d", s, id);
 	switch (id) {
 	case SPA_PROP_mute:
 		if (control->n_values > 0)
@@ -525,8 +520,9 @@ static void stream_drained(void *data)
 static const struct pw_stream_events stream_events =
 {
 	PW_VERSION_STREAM_EVENTS,
+	.destroy = stream_destroy,
 	.state_changed = stream_state_changed,
-	.format_changed = stream_format_changed,
+	.param_changed = stream_param_changed,
 	.control_info = stream_control_info,
 	.add_buffer = stream_add_buffer,
 	.remove_buffer = stream_remove_buffer,
@@ -566,12 +562,9 @@ static pa_stream* stream_new(pa_context *c, const char *name,
 				NULL);
 	pw_properties_update(props, &s->proplist->props->dict);
 
-	s->stream = pw_stream_new(c->remote, name, props);
 	s->refcount = 1;
 	s->context = c;
 	spa_list_init(&s->pending);
-
-	pw_stream_add_listener(s->stream, &s->stream_listener, &stream_events, s);
 
 	s->direction = PA_STREAM_NODIRECTION;
 	s->state = PA_STREAM_UNCONNECTED;
@@ -860,18 +853,26 @@ static int create_stream(pa_stream_direction_t direction,
 	uint32_t i, n_params = 0;
         uint8_t buffer[4096];
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-	uint32_t sample_rate = 0, stride = 0;
+	uint32_t sample_rate = 0, stride = 0, latency_num;
 	const char *str;
 	uint32_t devid;
 	struct global *g;
 	struct spa_dict_item items[5];
 	char latency[64];
 	bool monitor;
+	const char *name;
+	pa_context *c = s->context;
 
 	spa_assert(s);
 	spa_assert(s->refcount >= 1);
 
 	pw_log_debug("stream %p: connect %s %08x", s, dev, flags);
+
+	name = pa_proplist_gets(s->proplist, PA_PROP_MEDIA_NAME);
+
+	s->stream = pw_stream_new(c->core,
+			name, pw_properties_copy(c->props));
+	pw_stream_add_listener(s->stream, &s->stream_listener, &stream_events, s);
 
 	s->direction = direction;
 	s->timing_info_valid = false;
@@ -941,13 +942,13 @@ static int create_stream(pa_stream_direction_t direction,
 	if (direction == PA_STREAM_RECORD)
 		devid = s->direct_on_input;
 	else
-		devid = SPA_ID_INVALID;
+		devid = PW_ID_ANY;
 
 	if (dev == NULL) {
 		if ((str = getenv("PIPEWIRE_NODE")) != NULL)
 			devid = atoi(str);
 	}
-	else if (devid == SPA_ID_INVALID) {
+	else if (devid == PW_ID_ANY) {
 		uint32_t mask;
 
 		if (direction == PA_STREAM_PLAYBACK)
@@ -984,14 +985,15 @@ static int create_stream(pa_stream_direction_t direction,
 	else
 		str = "Music";
 
-	sprintf(latency, "%u/%u", s->buffer_attr.minreq / stride, sample_rate);
+	latency_num = s->buffer_attr.minreq / stride;
+	sprintf(latency, "%u/%u", SPA_MAX(latency_num, 1u), sample_rate);
 	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency);
 	items[1] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_TYPE, "Audio");
 	items[2] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_CATEGORY,
 				direction == PA_STREAM_PLAYBACK ?
 					"Playback" : "Capture");
 	items[3] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_ROLE, str);
-	items[4] = SPA_DICT_ITEM_INIT(PW_KEY_STREAM_MONITOR, monitor ? "1" : "0");
+	items[4] = SPA_DICT_ITEM_INIT(PW_KEY_STREAM_MONITOR, monitor ? "true" : "false");
 
 	pw_stream_update_properties(s->stream, &SPA_DICT_INIT(items, 5));
 
@@ -1537,8 +1539,8 @@ pa_operation* pa_stream_cork(pa_stream *s, int b, pa_stream_success_cb_t cb, voi
 	PA_CHECK_VALIDITY_RETURN_NULL(s->context, s->direction != PA_STREAM_UPLOAD, PA_ERR_BADSTATE);
 
 	s->corked = b;
-
-	pw_stream_set_active(s->stream, !b);
+	if (!b)
+		pw_stream_set_active(s->stream, true);
 	o = pa_operation_new(s->context, s, on_success, sizeof(struct success_ack));
 	d = o->userdata;
 	d->cb = cb;

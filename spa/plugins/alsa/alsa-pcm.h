@@ -139,7 +139,7 @@ struct state {
 	unsigned int alsa_started:1;
 	unsigned int alsa_sync:1;
 	unsigned int alsa_recovering:1;
-	unsigned int slaved:1;
+	unsigned int following:1;
 	unsigned int matching:1;
 
 	int64_t sample_count;
@@ -165,12 +165,14 @@ spa_alsa_enum_format(struct state *state, int seq,
 int spa_alsa_set_format(struct state *state, struct spa_audio_info *info, uint32_t flags);
 
 int spa_alsa_start(struct state *state);
-int spa_alsa_reslave(struct state *state);
+int spa_alsa_reassign_follower(struct state *state);
 int spa_alsa_pause(struct state *state);
 int spa_alsa_close(struct state *state);
 
 int spa_alsa_write(struct state *state, snd_pcm_uframes_t silence);
 int spa_alsa_read(struct state *state, snd_pcm_uframes_t silence);
+
+void spa_alsa_recycle_buffer(struct state *state, uint32_t buffer_id);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -1266,7 +1266,9 @@ static int register_a2dp_endpoint(struct spa_bt_monitor *monitor,
 		return -ENOTSUP;
 	}
 
-	asprintf(&object_path, "%s/%d", profile_path, monitor->count++);
+	object_path = spa_aprintf("%s/%d", profile_path, monitor->count++);
+	if (object_path == NULL)
+		return -errno;
 
 	spa_log_debug(monitor->log, "Registering endpoint: %s", object_path);
 
@@ -1714,7 +1716,9 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 
 	spa_log_debug(monitor->log, "NewConnection path=%s, fd=%d, profile %s", path, fd, handler);
 
-	asprintf(&pathfd, "%s/fd%d", path, fd);
+	if ((pathfd = spa_aprintf("%s/fd%d", path, fd)) == NULL)
+		return DBUS_HANDLER_RESULT_NEED_MEMORY;
+
 	t = transport_create(monitor, pathfd, sizeof(struct transport_data));
 	if (t == NULL) {
 		spa_log_warn(monitor->log, "can't create transport: %m");
@@ -2199,7 +2203,7 @@ static const struct spa_device_methods impl_device = {
 	.add_listener = impl_device_add_listener,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct spa_bt_monitor *this;
 
@@ -2208,13 +2212,11 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct spa_bt_monitor *) handle;
 
-	switch (type) {
-	case SPA_TYPE_INTERFACE_Device:
+	if (strcmp(type, SPA_TYPE_INTERFACE_Device) == 0)
 		*interface = &this->device;
-		break;
-	default:
+	else
 		return -ENOENT;
-	}
+
 	return 0;
 }
 
@@ -2238,7 +2240,6 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct spa_bt_monitor *this;
-	uint32_t i;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -2248,22 +2249,11 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct spa_bt_monitor *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DBus:
-			this->dbus = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_Loop:
-			this->main_loop = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_System:
-			this->main_system = support[i].data;
-			break;
-		}
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->dbus = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DBus);
+	this->main_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
+	this->main_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_System);
+
 	if (this->dbus == NULL) {
 		spa_log_error(this->log, "a dbus is needed");
 		return -EINVAL;

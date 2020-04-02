@@ -40,7 +40,6 @@
 #include <spa/debug/types.h>
 
 #include "pipewire/pipewire.h"
-#include "pipewire/private.h"
 
 #include "modules/spa/spa-node.h"
 
@@ -56,12 +55,12 @@ struct buffer {
 };
 
 struct node {
-	struct pw_core *core;
+	struct pw_context *context;
 
-	struct pw_node *node;
+	struct pw_impl_node *node;
 	struct spa_hook node_listener;
 
-	struct pw_node *slave;
+	struct pw_impl_node *follower;
 
 	void *user_data;
 	enum pw_direction direction;
@@ -80,7 +79,7 @@ static void node_free(void *data)
 	pw_properties_free(n->props);
 }
 
-static void node_port_init(void *data, struct pw_port *port)
+static void node_port_init(void *data, struct pw_impl_port *port)
 {
 	struct node *n = data;
 	const struct pw_properties *old;
@@ -90,9 +89,9 @@ static void node_port_init(void *data, struct pw_port *port)
 	char position[8], *prefix;
 	bool is_monitor, is_device;
 
-	direction = pw_port_get_direction(port);
+	direction = pw_impl_port_get_direction(port);
 
-	old = pw_port_get_properties(port);
+	old = pw_impl_port_get_properties(port);
 
 	is_monitor = (str = pw_properties_get(old, PW_KEY_PORT_MONITOR)) != NULL &&
 			pw_properties_parse_bool(str);
@@ -123,13 +122,13 @@ static void node_port_init(void *data, struct pw_port *port)
 
 	if ((str = pw_properties_get(old, PW_KEY_AUDIO_CHANNEL)) == NULL ||
 	    strcmp(str, "UNK") == 0) {
-		snprintf(position, 7, "%d", port->port_id);
+		snprintf(position, 7, "%d", pw_impl_port_get_id(port));
 		str = position;
 	}
 	if (direction == n->direction) {
 		if (is_device) {
-			pw_properties_set(new, PW_KEY_PORT_PHYSICAL, "1");
-			pw_properties_set(new, PW_KEY_PORT_TERMINAL, "1");
+			pw_properties_set(new, PW_KEY_PORT_PHYSICAL, "true");
+			pw_properties_set(new, PW_KEY_PORT_TERMINAL, "true");
 		}
 	}
 
@@ -139,24 +138,24 @@ static void node_port_init(void *data, struct pw_port *port)
 		node_name = "node";
 	}
 	pw_properties_setf(new, PW_KEY_OBJECT_PATH, "%s:%s_%d",
-			path ? path : node_name, prefix, port->port_id);
+			path ? path : node_name, prefix, pw_impl_port_get_id(port));
 
 	pw_properties_setf(new, PW_KEY_PORT_NAME, "%s_%s", prefix, str);
 	pw_properties_setf(new, PW_KEY_PORT_ALIAS, "%s:%s_%s",
 			node_name, prefix, str);
 
-	pw_port_update_properties(port, &new->dict);
+	pw_impl_port_update_properties(port, &new->dict);
 	pw_properties_free(new);
 }
 
-static const struct pw_node_events node_events = {
-	PW_VERSION_NODE_EVENTS,
+static const struct pw_impl_node_events node_events = {
+	PW_VERSION_IMPL_NODE_EVENTS,
 	.free = node_free,
 	.port_init = node_port_init,
 };
 
 
-static int find_format(struct pw_node *node, enum pw_direction direction,
+static int find_format(struct pw_impl_node *node, enum pw_direction direction,
 		uint32_t *media_type, uint32_t *media_subtype)
 {
 	uint32_t state = 0;
@@ -166,7 +165,7 @@ static int find_format(struct pw_node *node, enum pw_direction direction,
 	struct spa_pod *format;
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	if ((res = spa_node_port_enum_params_sync(node->node,
+	if ((res = spa_node_port_enum_params_sync(pw_impl_node_get_implementation(node),
 				direction == PW_DIRECTION_INPUT ?
 					SPA_DIRECTION_INPUT :
 					SPA_DIRECTION_OUTPUT, 0,
@@ -186,12 +185,12 @@ static int find_format(struct pw_node *node, enum pw_direction direction,
 }
 
 
-struct pw_node *pw_adapter_new(struct pw_core *core,
-		struct pw_node *slave,
+struct pw_impl_node *pw_adapter_new(struct pw_context *context,
+		struct pw_impl_node *follower,
 		struct pw_properties *props,
 		size_t user_data_size)
 {
-	struct pw_node *node;
+	struct pw_impl_node *node;
 	struct node *n;
 	const char *str, *factory_name;
 	const struct pw_node_info *info;
@@ -199,13 +198,13 @@ struct pw_node *pw_adapter_new(struct pw_core *core,
 	int res;
 	uint32_t media_type, media_subtype;
 
-	info = pw_node_get_info(slave);
+	info = pw_impl_node_get_info(follower);
 	if (info == NULL) {
 		res = -EINVAL;
 		goto error;
 	}
 
-	pw_log_debug(NAME " %p: in %d/%d out %d/%d", slave,
+	pw_log_debug(NAME " %p: in %d/%d out %d/%d", follower,
 			info->n_input_ports, info->max_input_ports,
 			info->n_output_ports, info->max_output_ports);
 
@@ -232,11 +231,12 @@ struct pw_node *pw_adapter_new(struct pw_core *core,
 		pw_properties_set(props, "factory.mode", str);
 	}
 
-	if ((res = find_format(slave, direction, &media_type, &media_subtype)) < 0)
+	if ((res = find_format(follower, direction, &media_type, &media_subtype)) < 0)
 		goto error;
 
 	if (media_type == SPA_MEDIA_TYPE_audio) {
-		pw_properties_setf(props, "audio.adapt.slave", "pointer:%p", slave->node);
+		pw_properties_setf(props, "audio.adapt.follower", "pointer:%p",
+				pw_impl_node_get_implementation(follower));
 		pw_properties_set(props, SPA_KEY_LIBRARY_NAME, "audioconvert/libspa-audioconvert");
 		if (pw_properties_get(props, PW_KEY_MEDIA_CLASS) == NULL)
 			pw_properties_setf(props, PW_KEY_MEDIA_CLASS, "Audio/%s",
@@ -244,7 +244,8 @@ struct pw_node *pw_adapter_new(struct pw_core *core,
 		factory_name = SPA_NAME_AUDIO_ADAPT;
 	}
 	else if (media_type == SPA_MEDIA_TYPE_video) {
-		pw_properties_setf(props, "video.adapt.slave", "pointer:%p", slave->node);
+		pw_properties_setf(props, "video.adapt.follower", "pointer:%p",
+				pw_impl_node_get_implementation(follower));
 		pw_properties_set(props, SPA_KEY_LIBRARY_NAME, "videoconvert/libspa-videoconvert");
 		if (pw_properties_get(props, PW_KEY_MEDIA_CLASS) == NULL)
 			pw_properties_setf(props, PW_KEY_MEDIA_CLASS, "Video/%s",
@@ -255,7 +256,7 @@ struct pw_node *pw_adapter_new(struct pw_core *core,
 		goto error;
 	}
 
-	node = pw_spa_node_load(core,
+	node = pw_spa_node_load(context,
 				factory_name,
 				PW_SPA_NODE_FLAG_ACTIVATE | PW_SPA_NODE_FLAG_NO_REGISTER,
 				pw_properties_copy(props),
@@ -267,9 +268,9 @@ struct pw_node *pw_adapter_new(struct pw_core *core,
 	}
 
 	n = pw_spa_node_get_user_data(node);
-	n->core = core;
+	n->context = context;
 	n->node = node;
-	n->slave = slave;
+	n->follower = follower;
 	n->direction = direction;
 	n->props = props;
 	n->media_type = media_type;
@@ -279,7 +280,7 @@ struct pw_node *pw_adapter_new(struct pw_core *core,
 	if (user_data_size > 0)
 		n->user_data = SPA_MEMBER(n, sizeof(struct node), void);
 
-	pw_node_add_listener(node, &n->node_listener, &node_events, n);
+	pw_impl_node_add_listener(node, &n->node_listener, &node_events, n);
 
 	return node;
 
@@ -290,7 +291,7 @@ error:
 	return NULL;
 }
 
-void *pw_adapter_get_user_data(struct pw_node *node)
+void *pw_adapter_get_user_data(struct pw_impl_node *node)
 {
 	struct node *n = pw_spa_node_get_user_data(node);
 	return n->user_data;

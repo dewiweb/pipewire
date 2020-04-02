@@ -881,7 +881,7 @@ static int spa_v4l2_set_format(struct impl *this, struct spa_video_info *format,
 	streamparm.parm.capture.timeperframe.numerator = framerate->denom;
 	streamparm.parm.capture.timeperframe.denominator = framerate->num;
 
-	spa_log_info(this->log, "v4l2: set %08x %dx%d %d/%d", fmt.fmt.pix.pixelformat,
+	spa_log_info(this->log, "v4l2: set %.4s %dx%d %d/%d", (char *)&fmt.fmt.pix.pixelformat,
 		     fmt.fmt.pix.width, fmt.fmt.pix.height,
 		     streamparm.parm.capture.timeperframe.denominator,
 		     streamparm.parm.capture.timeperframe.numerator);
@@ -902,7 +902,7 @@ static int spa_v4l2_set_format(struct impl *this, struct spa_video_info *format,
 	if (xioctl(dev->fd, VIDIOC_S_PARM, &streamparm) < 0)
 		spa_log_warn(this->log, "VIDIOC_S_PARM: %m");
 
-	spa_log_info(this->log, "v4l2: got %08x %dx%d %d/%d", fmt.fmt.pix.pixelformat,
+	spa_log_info(this->log, "v4l2: got %.4s %dx%d %d/%d", (char *)&fmt.fmt.pix.pixelformat,
 		     fmt.fmt.pix.width, fmt.fmt.pix.height,
 		     streamparm.parm.capture.timeperframe.denominator,
 		     streamparm.parm.capture.timeperframe.numerator);
@@ -1165,7 +1165,6 @@ static int mmap_read(struct impl *this)
 {
 	struct port *port = &this->out_ports[0];
 	struct spa_v4l2_device *dev = &port->dev;
-	struct spa_io_buffers *io;
 	struct v4l2_buffer buf;
 	struct buffer *b;
 	struct spa_data *d;
@@ -1196,8 +1195,10 @@ static int mmap_read(struct impl *this)
 		b->h->flags = 0;
 		if (buf.flags & V4L2_BUF_FLAG_ERROR)
 			b->h->flags |= SPA_META_HEADER_FLAG_CORRUPTED;
+		b->h->offset = 0;
 		b->h->seq = buf.sequence;
-		b->h->pts = buf.sequence * 1000000000LL / port->rate.denom;
+		b->h->pts = pts;
+		b->h->dts_offset = 0;
 	}
 
 	d = b->outbuf->datas;
@@ -1208,26 +1209,16 @@ static int mmap_read(struct impl *this)
 	if (buf.flags & V4L2_BUF_FLAG_ERROR)
 		d[0].flags |= SPA_CHUNK_FLAG_CORRUPTED;
 
-	SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUTSTANDING);
-
-	io = port->io;
-	if (io != NULL && io->status != SPA_STATUS_HAVE_DATA) {
-		io->buffer_id = b->id;
-		io->status = SPA_STATUS_HAVE_DATA;
-	}
-	else {
-		spa_list_append(&port->queue, &b->link);
-	}
-
-	spa_log_trace(this->log, "v4l2 %p: now queued %d", this, b->id);
-	spa_node_call_ready(&this->callbacks, SPA_STATUS_HAVE_DATA);
-
+	spa_list_append(&port->queue, &b->link);
 	return 0;
 }
 
 static void v4l2_on_fd_events(struct spa_source *source)
 {
 	struct impl *this = source->data;
+	struct spa_io_buffers *io;
+	struct port *port = &this->out_ports[0];
+	struct buffer *b;
 
 	if (source->rmask & SPA_IO_ERR) {
 		struct port *port = &this->out_ports[0];
@@ -1244,6 +1235,24 @@ static void v4l2_on_fd_events(struct spa_source *source)
 
 	if (mmap_read(this) < 0)
 		return;
+
+	if (spa_list_is_empty(&port->queue))
+		return;
+
+	io = port->io;
+	if (io != NULL && io->status != SPA_STATUS_HAVE_DATA) {
+		if (io->buffer_id < port->n_buffers)
+			spa_v4l2_buffer_recycle(this, io->buffer_id);
+
+		b = spa_list_first(&port->queue, struct buffer, link);
+		spa_list_remove(&b->link);
+		SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUTSTANDING);
+
+		io->buffer_id = b->id;
+		io->status = SPA_STATUS_HAVE_DATA;
+		spa_log_trace(this->log, "v4l2 %p: now queued %d", this, b->id);
+	}
+	spa_node_call_ready(&this->callbacks, SPA_STATUS_HAVE_DATA);
 }
 
 static int spa_v4l2_use_buffers(struct impl *this, struct spa_buffer **buffers, uint32_t n_buffers)
@@ -1534,11 +1543,11 @@ static int spa_v4l2_stream_off(struct impl *this)
 	enum v4l2_buf_type type;
 	uint32_t i;
 
-	if (dev->fd == -1)
-		return -EIO;
-
 	if (!dev->active)
 		return 0;
+
+	if (dev->fd == -1)
+		return -EIO;
 
 	spa_log_debug(this->log, "stopping");
 

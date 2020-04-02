@@ -44,7 +44,8 @@ struct pw_filter;
 #include <spa/node/io.h>
 #include <spa/param/param.h>
 
-#include <pipewire/remote.h>
+#include <pipewire/core.h>
+#include <pipewire/stream.h>
 
 /** \enum pw_filter_state The state of a filter \memberof pw_filter */
 enum pw_filter_state {
@@ -124,7 +125,7 @@ enum pw_filter_port_flags {
 /** Create a new unconneced \ref pw_filter \memberof pw_filter
  * \return a newly allocated \ref pw_filter */
 struct pw_filter *
-pw_filter_new(struct pw_remote *remote,		/**< a \ref pw_remote */
+pw_filter_new(struct pw_core *core,		/**< a \ref pw_core */
 	      const char *name,			/**< a filter media name */
 	      struct pw_properties *props	/**< filter properties, ownership is taken */);
 
@@ -145,9 +146,9 @@ void pw_filter_add_listener(struct pw_filter *filter,
 
 enum pw_filter_state pw_filter_get_state(struct pw_filter *filter, const char **error);
 
-const char *pw_stream_get_name(struct pw_stream *stream);
+const char *pw_filter_get_name(struct pw_filter *filter);
 
-struct pw_remote *pw_filter_get_remote(struct pw_filter *filter);
+struct pw_core *pw_filter_get_core(struct pw_filter *filter);
 
 /** Connect a filter for processing. \memberof pw_filter
  * \return 0 on success < 0 on error.
@@ -189,11 +190,15 @@ const struct pw_properties *pw_filter_get_properties(struct pw_filter *filter,
 int pw_filter_update_properties(struct pw_filter *filter,
 		void *port_data, const struct spa_dict *dict);
 
+/** Set the filter in error state */
+int pw_filter_set_error(struct pw_filter *filter,	/**< a \ref pw_filter */
+			int res,			/**< a result code */
+			const char *error, ...		/**< an error message */) SPA_PRINTF_FUNC(3, 4);
+
 /** Update params, use NULL port_data for global filter params */
 int
 pw_filter_update_params(struct pw_filter *filter,	/**< a \ref pw_filter */
 			void *port_data,		/**< data associated with port */
-			int res,			/**< a result code */
 			const struct spa_pod **params,	/**< an array of params. */
 			uint32_t n_params		/**< number of elements in \a params */);
 

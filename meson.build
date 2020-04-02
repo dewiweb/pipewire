@@ -1,8 +1,8 @@
 project('pipewire', ['c' ],
-  version : '0.2.9',
+  version : '0.3.2',
   license : 'MIT',
   meson_version : '>= 0.50.0',
-  default_options : [ 'warning_level=1',
+  default_options : [ 'warning_level=3',
                       'c_std=gnu99',
                       'buildtype=debugoptimized' ])
 
@@ -18,10 +18,13 @@ else
   pipewire_version_nano = 0
 endif
 
-spaversion = '0.1'
+spaversion = '0.2'
 apiversion = '0.3'
 soversion = 0
 libversion = '@0@.@1@.0'.format(soversion, pipewire_version_minor.to_int() * 100 + pipewire_version_micro.to_int())
+
+pipewire_name = 'pipewire-@0@'.format(apiversion)
+spa_name = 'spa-@0@'.format(spaversion)
 
 prefix = get_option('prefix')
 pipewire_bindir = join_paths(prefix, get_option('bindir'))
@@ -31,8 +34,10 @@ pipewire_localedir = join_paths(prefix, get_option('localedir'))
 pipewire_sysconfdir = join_paths(prefix, get_option('sysconfdir'))
 
 pipewire_configdir = join_paths(pipewire_sysconfdir, 'pipewire')
-modules_install_dir = join_paths(pipewire_libdir, 'pipewire-@0@'.format(apiversion))
-spa_plugindir = join_paths(pipewire_libdir, 'spa')
+modules_install_dir = join_paths(pipewire_libdir, pipewire_name)
+spa_plugindir = join_paths(pipewire_libdir, spa_name)
+
+pipewire_headers_dir = join_paths(pipewire_name, 'pipewire')
 
 gnome = import('gnome')
 pkgconfig = import('pkgconfig')
@@ -47,9 +52,30 @@ if cc.get_id() == 'gcc'
 			'-Wimplicit-fallthrough',
 			'-Wpointer-arith',
 			'-Wformat-security',
+			'-Werror=suggest-attribute=format',
+			'-Wmissing-braces',
+			'-Wtype-limits',
+			'-Wold-style-declaration',
+			'-Wvariadic-macros',
+		        '-Wno-missing-field-initializers',
+		        '-Wno-unused-parameter',
+			'-Wno-pedantic',
+			'-DFASTPATH',
 #			'-DSPA_DEBUG_MEMCPY',
-#			'-DFASTPATH',
 			language : 'c')
+  add_global_arguments('-fvisibility=hidden',
+			'-Wsign-compare',
+			'-Wimplicit-fallthrough',
+			'-Wpointer-arith',
+			'-Wformat-security',
+			'-Werror=suggest-attribute=format',
+			'-Wmissing-braces',
+			'-Wtype-limits',
+			'-Wvariadic-macros',
+		        '-Wno-missing-field-initializers',
+		        '-Wno-unused-parameter',
+			'-Wno-pedantic',
+			language : 'cpp')
 endif
 
 sse_args = '-msse'
@@ -67,6 +93,21 @@ have_sse41 = cc.has_argument(sse41_args)
 have_fma = cc.has_argument(fma_args)
 have_avx = cc.has_argument(avx_args)
 have_avx2 = cc.has_argument(avx2_args)
+
+have_neon = false
+if host_machine.cpu_family() == 'arm' or host_machine.cpu_family() == 'aarch64'
+  if cc.compiles(
+'''
+#include <arm_neon.h>
+int32x4_t testfunc(int16_t *a, int16_t *b) {
+return vmull_s16(vld1_s16(a), vld1_s16(b));
+}
+''',
+   name : 'NEON support')
+    have_neon = true
+  endif
+endif
+
 
 cdata = configuration_data()
 cdata.set('PIPEWIRE_VERSION_MAJOR', pipewire_version_major)
@@ -173,6 +214,7 @@ configinc = include_directories('.')
 pipewire_inc = include_directories('src')
 
 makedata = configuration_data()
+  makedata.set('BUILD_ROOT', meson.build_root())
   makedata.set('VERSION', pipewire_version)
 if version_arr.length() == 4
   makedata.set('TAG', 'HEAD')
@@ -191,6 +233,7 @@ dl_lib = cc.find_library('dl', required : false)
 pthread_lib = dependency('threads')
 dbus_dep = dependency('dbus-1')
 sdl_dep = dependency('sdl2', required : false)
+sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : false)
 
 if get_option('gstreamer') or get_option('pipewire-pulseaudio')
   glib_dep = dependency('glib-2.0', version : '>=2.32.0')
@@ -212,6 +255,10 @@ epoll_shim_dep = (build_machine.system() == 'freebsd'
     ? dependency('epoll-shim', required: true)
     : dependency('', required: false))
 
+alsa_dep = (get_option('pipewire-alsa')
+    ? dependency('alsa')
+    : dependency('', required: false))
+
 subdir('spa')
 subdir('src')
 
@@ -226,7 +273,6 @@ if get_option('pipewire-pulseaudio')
 endif
 
 if get_option('pipewire-alsa')
-  alsa_dep = dependency('alsa')
   subdir('pipewire-alsa/alsa-plugins')
 endif
 
@@ -249,4 +295,5 @@ if get_option('man')
 endif
 
 setenv = find_program('pw-uninstalled.sh')
-run_target('uninstalled', command : [setenv, '-b@0@'.format(meson.build_root())])
+run_target('uninstalled', command : [setenv,
+    '-b@0@'.format(meson.build_root()), '-v@0@'.format(pipewire_version)])

@@ -31,9 +31,10 @@
 #include <sys/socket.h>
 
 #include <spa/debug/pod.h>
+#include <spa/utils/result.h>
+#include <spa/pod/builder.h>
 
 #include <pipewire/pipewire.h>
-#include "pipewire/private.h"
 
 #include "connection.h"
 
@@ -56,14 +57,11 @@ struct buffer {
 	size_t offset;
 	size_t fds_offset;
 	struct pw_protocol_native_message msg;
-
-	bool update;
-	bool first;
 };
 
 struct impl {
 	struct pw_protocol_native_connection this;
-	struct pw_core *core;
+	struct pw_context *context;
 
 	struct buffer in, out;
 	struct spa_pod_builder builder;
@@ -120,7 +118,7 @@ uint32_t pw_protocol_native_connection_add_fd(struct pw_protocol_native_connecti
 
 	index = buf->msg.n_fds;
 	if (index + buf->n_fds >= MAX_FDS) {
-		pw_log_error("connection %p: too many fds", conn);
+		pw_log_error("connection %p: too many fds (%d)", conn, MAX_FDS);
 		return SPA_IDX_INVALID;
 	}
 
@@ -147,7 +145,7 @@ static void *connection_ensure_size(struct pw_protocol_native_connection *conn, 
 			errno = -res;
 			return NULL;
 		}
-		pw_log_warn("connection %p: resize buffer to %zd %zd %zd",
+		pw_log_debug("connection %p: resize buffer to %zd %zd %zd",
 			    conn, buf->buffer_size, size, buf->buffer_maxsize);
 	}
 	return (uint8_t *) buf->buffer_data + buf->buffer_size;
@@ -206,7 +204,7 @@ static int refill_buffer(struct pw_protocol_native_connection *conn, struct buff
 
 	/* ERRORS */
 recv_error:
-	pw_log_error("could not recvmsg on fd:%d: %s", conn->fd, strerror(errno));
+	pw_log_error("connection %p: could not recvmsg on fd:%d: %m", conn, conn->fd);
 	return -errno;
 }
 
@@ -225,7 +223,7 @@ static void clear_buffer(struct buffer *buf)
  *
  * \memberof pw_protocol_native_connection
  */
-struct pw_protocol_native_connection *pw_protocol_native_connection_new(struct pw_core *core, int fd)
+struct pw_protocol_native_connection *pw_protocol_native_connection_new(struct pw_context *context, int fd)
 {
 	struct impl *impl;
 	struct pw_protocol_native_connection *this;
@@ -235,7 +233,7 @@ struct pw_protocol_native_connection *pw_protocol_native_connection_new(struct p
 		return NULL;
 
 	debug_messages = pw_debug_is_category_enabled("connection");
-	impl->core = core;
+	impl->context = context;
 
 	this = &impl->this;
 
@@ -251,8 +249,6 @@ struct pw_protocol_native_connection *pw_protocol_native_connection_new(struct p
 	impl->out.buffer_maxsize = MAX_BUFFER_SIZE;
 	impl->in.buffer_data = calloc(1, MAX_BUFFER_SIZE);
 	impl->in.buffer_maxsize = MAX_BUFFER_SIZE;
-	impl->in.update = true;
-	impl->in.first = true;
 
 	if (impl->out.buffer_data == NULL || impl->in.buffer_data == NULL)
 		goto no_mem;
@@ -264,6 +260,12 @@ no_mem:
 	free(impl->in.buffer_data);
 	free(impl);
 	return NULL;
+}
+
+int pw_protocol_native_connection_set_fd(struct pw_protocol_native_connection *conn, int fd)
+{
+	conn->fd = fd;
+	return 0;
 }
 
 /** Destroy a connection
@@ -304,9 +306,8 @@ static int prepare_packet(struct pw_protocol_native_connection *conn, struct buf
 	buf->msg.opcode = p[1] >> 24;
 	len = p[1] & 0xffffff;
 
-	if (buf->first) {
-		buf->first = false;
-		if (p[2] != 0) {
+	if (buf->msg.id == 0 && buf->msg.opcode == 1) {
+		if (p[3] >= 4) {
 			pw_log_warn("old version detected");
 			impl->version = 0;
 			impl->hdr_size = 8;
@@ -586,7 +587,6 @@ int pw_protocol_native_connection_clear(struct pw_protocol_native_connection *co
 
 	clear_buffer(&impl->out);
 	clear_buffer(&impl->in);
-	impl->in.update = true;
 
 	return 0;
 }

@@ -29,155 +29,172 @@
 extern "C" {
 #endif
 
-/** \page page_node Node
- *
- * \section page_node_overview Overview
- *
- * The node object processes data. The node has a list of
- * input and output ports (\ref page_port) on which it
- * will receive and send out buffers respectively.
- */
-/** \class pw_node
- *
- * PipeWire node class.
- */
+#include <stdarg.h>
+#include <errno.h>
+
+#include <spa/utils/defs.h>
+#include <spa/utils/hook.h>
+#include <spa/node/command.h>
+#include <spa/param/param.h>
+
+#include <pipewire/proxy.h>
+
+#define PW_TYPE_INTERFACE_Node	PW_TYPE_INFO_INTERFACE_BASE "Node"
+
+#define PW_VERSION_NODE		3
 struct pw_node;
 
-#include <spa/node/node.h>
-#include <spa/node/event.h>
+/** \enum pw_node_state The different node states \memberof pw_node */
+enum pw_node_state {
+	PW_NODE_STATE_ERROR = -1,	/**< error state */
+	PW_NODE_STATE_CREATING = 0,	/**< the node is being created */
+	PW_NODE_STATE_SUSPENDED = 1,	/**< the node is suspended, the device might
+					 *   be closed */
+	PW_NODE_STATE_IDLE = 2,		/**< the node is running but there is no active
+					 *   port */
+	PW_NODE_STATE_RUNNING = 3,	/**< the node is running */
+};
 
-#include <pipewire/core.h>
-#include <pipewire/global.h>
-#include <pipewire/introspect.h>
-#include <pipewire/port.h>
-#include <pipewire/resource.h>
+/** Convert a \ref pw_node_state to a readable string \memberof pw_node */
+const char * pw_node_state_as_string(enum pw_node_state state);
 
-/** Node events, listen to them with \ref pw_node_add_listener */
+/** The node information. Extra information can be added in later versions \memberof pw_introspect */
+struct pw_node_info {
+	uint32_t id;				/**< id of the global */
+	uint32_t max_input_ports;		/**< maximum number of inputs */
+	uint32_t max_output_ports;		/**< maximum number of outputs */
+#define PW_NODE_CHANGE_MASK_INPUT_PORTS		(1 << 0)
+#define PW_NODE_CHANGE_MASK_OUTPUT_PORTS	(1 << 1)
+#define PW_NODE_CHANGE_MASK_STATE		(1 << 2)
+#define PW_NODE_CHANGE_MASK_PROPS		(1 << 3)
+#define PW_NODE_CHANGE_MASK_PARAMS		(1 << 4)
+#define PW_NODE_CHANGE_MASK_ALL			((1 << 5)-1)
+	uint64_t change_mask;			/**< bitfield of changed fields since last call */
+	uint32_t n_input_ports;			/**< number of inputs */
+	uint32_t n_output_ports;		/**< number of outputs */
+	enum pw_node_state state;		/**< the current state of the node */
+	const char *error;			/**< an error reason if \a state is error */
+	struct spa_dict *props;			/**< the properties of the node */
+	struct spa_param_info *params;		/**< parameters */
+	uint32_t n_params;			/**< number of items in \a params */
+};
+
+struct pw_node_info *
+pw_node_info_update(struct pw_node_info *info,
+		    const struct pw_node_info *update);
+
+void
+pw_node_info_free(struct pw_node_info *info);
+
+#define PW_NODE_EVENT_INFO	0
+#define PW_NODE_EVENT_PARAM	1
+#define PW_NODE_EVENT_NUM	2
+
+/** Node events */
 struct pw_node_events {
 #define PW_VERSION_NODE_EVENTS	0
 	uint32_t version;
-
-	/** the node is destroyed */
-        void (*destroy) (void *data);
-	/** the node is about to be freed */
-        void (*free) (void *data);
-	/** the node is initialized */
-        void (*initialized) (void *data);
-
-	/** a port is being initialized on the node */
-        void (*port_init) (void *data, struct pw_port *port);
-	/** a port was added */
-        void (*port_added) (void *data, struct pw_port *port);
-	/** a port was removed */
-        void (*port_removed) (void *data, struct pw_port *port);
-
-	/** the node info changed */
-	void (*info_changed) (void *data, const struct pw_node_info *info);
-	/** a port on the node changed info */
-	void (*port_info_changed) (void *data, struct pw_port *port,
-			const struct pw_port_info *info);
-	/** the node active state changed */
-	void (*active_changed) (void *data, bool active);
-
-	/** a new state is requested on the node */
-	void (*state_request) (void *data, enum pw_node_state state);
-	/** the state of the node changed */
-	void (*state_changed) (void *data, enum pw_node_state old,
-			       enum pw_node_state state, const char *error);
-
-        /** a result was received */
-	void (*result) (void *data, int seq, int res, uint32_t type, const void *result);
-
-        /** an event is emited */
-	void (*event) (void *data, const struct spa_event *event);
-
-	/** the driver of the node changed */
-	void (*driver_changed) (void *data, struct pw_node *old, struct pw_node *driver);
-
-	/** a peer was added */
-	void (*peer_added) (void *data, struct pw_node *peer);
-	/** a peer was removed */
-	void (*peer_removed) (void *data, struct pw_node *peer);
+	/**
+	 * Notify node info
+	 *
+	 * \param info info about the node
+	 */
+	void (*info) (void *object, const struct pw_node_info *info);
+	/**
+	 * Notify a node param
+	 *
+	 * Event emited as a result of the enum_params method.
+	 *
+	 * \param seq the sequence number of the request
+	 * \param id the param id
+	 * \param index the param index
+	 * \param next the param index of the next param
+	 * \param param the parameter
+	 */
+	void (*param) (void *object, int seq,
+		      uint32_t id, uint32_t index, uint32_t next,
+		      const struct spa_pod *param);
 };
 
-/** Create a new node \memberof pw_node */
-struct pw_node *
-pw_node_new(struct pw_core *core,		/**< the core */
-	    struct pw_properties *properties,	/**< extra properties */
-	    size_t user_data_size		/**< user data size */);
+#define PW_NODE_METHOD_ADD_LISTENER	0
+#define PW_NODE_METHOD_SUBSCRIBE_PARAMS	1
+#define PW_NODE_METHOD_ENUM_PARAMS	2
+#define PW_NODE_METHOD_SET_PARAM	3
+#define PW_NODE_METHOD_SEND_COMMAND	4
+#define PW_NODE_METHOD_NUM		5
 
-/** Complete initialization of the node and register */
-int pw_node_register(struct pw_node *node,		/**< node to register */
-		     struct pw_properties *properties	/**< extra properties */);
+/** Node methods */
+struct pw_node_methods {
+#define PW_VERSION_NODE_METHODS		0
+	uint32_t version;
 
-/** Destroy a node */
-void pw_node_destroy(struct pw_node *node);
+	int (*add_listener) (void *object,
+			struct spa_hook *listener,
+			const struct pw_node_events *events,
+			void *data);
+	/**
+	 * Subscribe to parameter changes
+	 *
+	 * Automatically emit param events for the given ids when
+	 * they are changed.
+	 *
+	 * \param ids an array of param ids
+	 * \param n_ids the number of ids in \a ids
+	 */
+	int (*subscribe_params) (void *object, uint32_t *ids, uint32_t n_ids);
 
-/** Get the node info */
-const struct pw_node_info *pw_node_get_info(struct pw_node *node);
+	/**
+	 * Enumerate node parameters
+	 *
+	 * Start enumeration of node parameters. For each param, a
+	 * param event will be emited.
+	 *
+	 * \param seq a sequence number to place in the reply
+	 * \param id the parameter id to enum or PW_ID_ANY for all
+	 * \param start the start index or 0 for the first param
+	 * \param num the maximum number of params to retrieve
+	 * \param filter a param filter or NULL
+	 */
+	int (*enum_params) (void *object, int seq, uint32_t id,
+			uint32_t start, uint32_t num,
+			const struct spa_pod *filter);
 
-/** Get node user_data. The size of the memory was given in \ref pw_node_new */
-void * pw_node_get_user_data(struct pw_node *node);
+	/**
+	 * Set a parameter on the node
+	 *
+	 * \param id the parameter id to set
+	 * \param flags extra parameter flags
+	 * \param param the parameter to set
+	 */
+	int (*set_param) (void *object, uint32_t id, uint32_t flags,
+			const struct spa_pod *param);
 
-/** Get the core of this node */
-struct pw_core *pw_node_get_core(struct pw_node *node);
+	/**
+	 * Send a command to the node
+	 *
+	 * \param command the command to send
+	 */
+	int (*send_command) (void *object, const struct spa_command *command);
+};
 
-/** Get the global of this node */
-struct pw_global *pw_node_get_global(struct pw_node *node);
+#define pw_node_method(o,method,version,...)				\
+({									\
+	int _res = -ENOTSUP;						\
+	spa_interface_call_res((struct spa_interface*)o,		\
+			struct pw_node_methods, _res,			\
+			method, version, ##__VA_ARGS__);		\
+	_res;								\
+})
 
-/** Get the node properties */
-const struct pw_properties *pw_node_get_properties(struct pw_node *node);
-
-/** Update the node properties */
-int pw_node_update_properties(struct pw_node *node, const struct spa_dict *dict);
-
-/** Set the node implementation */
-int pw_node_set_implementation(struct pw_node *node, struct spa_node *spa_node);
-
-/** Get the node implementation */
-struct spa_node *pw_node_get_implementation(struct pw_node *node);
-
-/** Add an event listener */
-void pw_node_add_listener(struct pw_node *node,
-			  struct spa_hook *listener,
-			  const struct pw_node_events *events,
-			  void *data);
-
-/** Iterate the ports in the given direction. The callback should return
- * 0 to fetch the next item, any other value stops the iteration and returns
- * the value. When all callbacks return 0, this function returns 0 when all
- * items are iterated. */
-int pw_node_for_each_port(struct pw_node *node,
-			  enum pw_direction direction,
-			  int (*callback) (void *data, struct pw_port *port),
-			  void *data);
-
-int pw_node_for_each_param(struct pw_node *node,
-			   int seq, uint32_t param_id,
-			   uint32_t index, uint32_t max,
-			   const struct spa_pod *filter,
-			   int (*callback) (void *data, int seq,
-					    uint32_t id, uint32_t index, uint32_t next,
-					    struct spa_pod *param),
-			   void *data);
-
-/** Find the port with direction and port_id or NULL when not found. Passing
- * SPA_ID_INVALID for port_id will return any port, preferably an unlinked one. */
-struct pw_port *
-pw_node_find_port(struct pw_node *node, enum pw_direction direction, uint32_t port_id);
-
-/** Get a free unused port_id from the node */
-uint32_t pw_node_get_free_port_id(struct pw_node *node, enum pw_direction direction);
-
-/** Set a node active. This will start negotiation with all linked active
-  * nodes and start data transport */
-int pw_node_set_active(struct pw_node *node, bool active);
-
-/** Check if a node is active */
-bool pw_node_is_active(struct pw_node *node);
+/** Node */
+#define pw_node_add_listener(c,...)	pw_node_method(c,add_listener,0,__VA_ARGS__)
+#define pw_node_subscribe_params(c,...)	pw_node_method(c,subscribe_params,0,__VA_ARGS__)
+#define pw_node_enum_params(c,...)	pw_node_method(c,enum_params,0,__VA_ARGS__)
+#define pw_node_set_param(c,...)	pw_node_method(c,set_param,0,__VA_ARGS__)
+#define pw_node_send_command(c,...)	pw_node_method(c,send_command,0,__VA_ARGS__)
 
 #ifdef __cplusplus
-}
+}  /* extern "C" */
 #endif
 
 #endif /* PIPEWIRE_NODE_H */

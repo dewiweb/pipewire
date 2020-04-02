@@ -43,9 +43,8 @@ extern "C" {
  * \section sec_page_proxy_core Core proxy
  *
  * A proxy for a remote core object can be obtained by making
- * a remote connection. See \ref pw_page_remote_api
- *
- * A pw_core_proxy can then be retrieved with \ref pw_remote_get_core_proxy
+ * a remote connection with \ref pw_core_connect.
+ * See \ref pw_page_remote_api
  *
  * Some methods on proxy object allow creation of more proxy objects or
  * create a binding between a local proxy and global resource.
@@ -111,6 +110,13 @@ struct pw_proxy_events {
 	/** The proxy is destroyed */
         void (*destroy) (void *data);
 
+	/** a proxy is bound to a global id */
+        void (*bound) (void *data, uint32_t global_id);
+
+	/** a proxy is removed from the server. Use pw_proxy_destroy to
+	 * free the proxy. */
+        void (*removed) (void *data);
+
 	/** a reply to a sync method completed */
         void (*done) (void *data, int seq);
 
@@ -122,7 +128,7 @@ struct pw_proxy_events {
   * can be retrieved with \ref pw_proxy_get_id . */
 struct pw_proxy *
 pw_proxy_new(struct pw_proxy *factory,	/**< factory */
-	     uint32_t type,		/**< interface type */
+	     const char *type,		/**< interface type */
 	     uint32_t version,		/**< interface version */
 	     size_t user_data_size	/**< size of user data */);
 
@@ -148,6 +154,9 @@ void *pw_proxy_get_user_data(struct pw_proxy *proxy);
 /** Get the local id of the proxy */
 uint32_t pw_proxy_get_id(struct pw_proxy *proxy);
 
+/** Get the type and version of the proxy */
+const char *pw_proxy_get_type(struct pw_proxy *proxy, uint32_t *version);
+
 /** Get the protocol used for the proxy */
 struct pw_protocol *pw_proxy_get_protocol(struct pw_proxy *proxy);
 
@@ -155,14 +164,25 @@ struct pw_protocol *pw_proxy_get_protocol(struct pw_proxy *proxy);
  * with the same seq number of the reply. */
 int pw_proxy_sync(struct pw_proxy *proxy, int seq);
 
+/** Set the global id this proxy is bound to. This is usually used internally
+ * and will also emit the bound event */
+int pw_proxy_set_bound_id(struct pw_proxy *proxy, uint32_t global_id);
+/** Get the global id bound to this proxy of SPA_ID_INVALID when not bound
+ * to a global */
+uint32_t pw_proxy_get_bound_id(struct pw_proxy *proxy);
+
 /** Generate an error for a proxy */
-int pw_proxy_error(struct pw_proxy *proxy, int res, const char *error, ...);
+int pw_proxy_error(struct pw_proxy *proxy, int res, const char *error);
+int pw_proxy_errorf(struct pw_proxy *proxy, int res, const char *error, ...) SPA_PRINTF_FUNC(3, 4);
 
 /** Get the listener of proxy */
 struct spa_hook_list *pw_proxy_get_object_listeners(struct pw_proxy *proxy);
 
 /** Get the marshal functions for the proxy */
 const struct pw_protocol_marshal *pw_proxy_get_marshal(struct pw_proxy *proxy);
+
+/** Install a marshal function on a proxy */
+int pw_proxy_install_marshal(struct pw_proxy *proxy, bool implementor);
 
 #define pw_proxy_notify(p,type,event,version,...)			\
 	spa_hook_list_call(pw_proxy_get_object_listeners(p),		\

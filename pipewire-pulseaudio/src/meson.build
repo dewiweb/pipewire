@@ -35,6 +35,10 @@ pipewire_mainloop_glib_sources = [
   'mainloop-glib.c',
 ]
 
+pipewire_mainloop_simple_sources = [
+  'simple.c',
+]
+
 pipewire_pulseaudio_c_args = [
   '-DHAVE_CONFIG_H',
   '-D_GNU_SOURCE',
@@ -44,22 +48,32 @@ pipewire_pulseaudio_c_args = [
 mapfile = 'map-file'
 vflag = '-Wl,--version-script,@0@/@1@'.format(meson.current_source_dir(), mapfile)
 
-pipewire_pulseaudio = shared_library('pulse',
+pipewire_pulseaudio = shared_library('pulse-pw',
     pipewire_pulseaudio_sources,
-    soversion : '0',
+    soversion : pipewire_version,
     c_args : pipewire_pulseaudio_c_args,
     link_args : vflag,
     include_directories : [configinc],
     dependencies : [pipewire_dep, pulseaudio_dep, mathlib],
-    install : false,
+    install : true,
 )
 
-pipewire_pulseaudio = shared_library('pulse-mainloop-glib',
+pipewire_pulseaudio = shared_library('pulse-mainloop-glib-pw',
     pipewire_mainloop_glib_sources,
-    soversion : '0',
+    soversion : pipewire_version,
     c_args : pipewire_pulseaudio_c_args,
     link_args : vflag,
     include_directories : [configinc],
     dependencies : [pipewire_dep, pulseaudio_dep, mathlib, glib_dep],
-    install : false,
+    install : true,
+)
+
+pipewire_pulseaudio = shared_library('pulse-simple-pw',
+    pipewire_mainloop_simple_sources,
+    soversion : pipewire_version,
+    c_args : pipewire_pulseaudio_c_args,
+    link_args : vflag,
+    include_directories : [configinc],
+    dependencies : [pipewire_dep, pulseaudio_dep, mathlib, glib_dep],
+    install : true,
 )

@@ -35,12 +35,11 @@
 #include <spa/pod/parser.h>
 #include <spa/debug/types.h>
 
-#include <pipewire/pipewire.h>
-#include "pipewire/private.h"
+#include <pipewire/impl.h>
 
 struct impl {
-	struct pw_core *core;
-	struct pw_device *device;
+	struct pw_context *context;
+	struct pw_impl_device *device;
 	struct spa_hook device_listener;
 
 	struct pw_resource *resource;
@@ -54,8 +53,8 @@ static void device_info(void *data, const struct spa_device_info *info)
 {
 	struct impl *impl = data;
 	if (!impl->registered) {
-		pw_device_register(impl->device, NULL);
-		pw_device_set_implementation(impl->device,
+		pw_impl_device_register(impl->device, NULL);
+		pw_impl_device_set_implementation(impl->device,
 				(struct spa_device*)impl->resource);
 		impl->registered = true;
 	}
@@ -76,7 +75,7 @@ static void device_resource_destroy(void *data)
 	spa_hook_remove(&impl->device_listener);
 	spa_hook_remove(&impl->resource_listener);
 	spa_hook_remove(&impl->object_listener);
-	pw_device_destroy(impl->device);
+	pw_impl_device_destroy(impl->device);
 }
 
 static const struct pw_resource_events resource_events = {
@@ -97,36 +96,49 @@ static void device_destroy(void *data)
 	pw_resource_destroy(impl->resource);
 }
 
-static const struct pw_device_events device_events = {
-	PW_VERSION_DEVICE_EVENTS,
+static void device_initialized(void *data)
+{
+	struct impl *impl = data;
+	struct pw_impl_device *device = impl->device;
+	struct pw_global *global = pw_impl_device_get_global(device);
+	uint32_t id = pw_global_get_id(global);
+
+	pw_log_debug("client-device %p: initialized global:%d", impl, id);
+	pw_resource_set_bound_id(impl->resource, id);
+}
+
+static const struct pw_impl_device_events device_events = {
+	PW_VERSION_IMPL_DEVICE_EVENTS,
 	.destroy = device_destroy,
+	.initialized = device_initialized,
 };
 
-struct pw_device *pw_client_device_new(struct pw_resource *resource,
+struct pw_impl_device *pw_client_device_new(struct pw_resource *resource,
 		struct pw_properties *properties)
 {
 	struct impl *impl;
-	struct pw_device *device;
-	struct pw_client *client = pw_resource_get_client(resource);
-	struct pw_core *core = pw_client_get_core(client);
+	struct pw_impl_device *device;
+	struct pw_impl_client *client = pw_resource_get_client(resource);
+	struct pw_context *context = pw_impl_client_get_context(client);
 
 	if (properties == NULL)
 		properties = pw_properties_new(NULL, NULL);
 	if (properties == NULL)
 		return NULL;
 
-	pw_properties_setf(properties, PW_KEY_CLIENT_ID, "%d", client->global->id);
+	pw_properties_setf(properties, PW_KEY_CLIENT_ID, "%d",
+			pw_impl_client_get_info(client)->id);
 
-	device = pw_device_new(core, properties, sizeof(struct impl));
+	device = pw_context_create_device(context, properties, sizeof(struct impl));
 	if (device == NULL)
 		return NULL;
 
-	impl = pw_device_get_user_data(device);
+	impl = pw_impl_device_get_user_data(device);
 	impl->device = device;
-	impl->core = core;
+	impl->context = context;
 	impl->resource = resource;
 
-	pw_device_add_listener(impl->device,
+	pw_impl_device_add_listener(impl->device,
 			&impl->device_listener,
 			&device_events, impl);
 

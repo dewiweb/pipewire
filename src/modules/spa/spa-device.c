@@ -35,14 +35,9 @@
 #include <spa/debug/types.h>
 
 #include "spa-device.h"
-#include "pipewire/device.h"
-#include "pipewire/port.h"
-#include "pipewire/log.h"
-#include "pipewire/private.h"
-#include "pipewire/pipewire.h"
 
 struct impl {
-	struct pw_device *this;
+	struct pw_impl_device *this;
 
 	enum pw_spa_device_flags flags;
 
@@ -58,7 +53,7 @@ struct impl {
 static void device_destroy(void *data)
 {
 	struct impl *impl = data;
-	struct pw_device *device = impl->this;
+	struct pw_impl_device *device = impl->this;
 
 	pw_log_debug("spa-device %p: free", device);
 
@@ -67,28 +62,28 @@ static void device_destroy(void *data)
 		pw_unload_spa_handle(impl->handle);
 }
 
-static const struct pw_device_events device_events = {
-	PW_VERSION_DEVICE_EVENTS,
+static const struct pw_impl_device_events device_events = {
+	PW_VERSION_IMPL_DEVICE_EVENTS,
 	.destroy = device_destroy,
 };
 
-struct pw_device *
-pw_spa_device_new(struct pw_core *core,
+struct pw_impl_device *
+pw_spa_device_new(struct pw_context *context,
 		  enum pw_spa_device_flags flags,
 		  struct spa_device *device,
 		  struct spa_handle *handle,
 		  struct pw_properties *properties,
 		  size_t user_data_size)
 {
-	struct pw_device *this;
+	struct pw_impl_device *this;
 	struct impl *impl;
 	int res;
 
-	this = pw_device_new(core, properties, sizeof(struct impl) + user_data_size);
+	this = pw_context_create_device(context, properties, sizeof(struct impl) + user_data_size);
 	if (this == NULL)
 		return NULL;
 
-	impl = this->user_data;
+	impl = pw_impl_device_get_user_data(this);
 	impl->this = this;
 	impl->device = device;
 	impl->handle = handle;
@@ -97,39 +92,39 @@ pw_spa_device_new(struct pw_core *core,
 	if (user_data_size > 0)
                 impl->user_data = SPA_MEMBER(impl, sizeof(struct impl), void);
 
-	pw_device_add_listener(this, &impl->device_listener, &device_events, impl);
-	pw_device_set_implementation(this, impl->device);
+	pw_impl_device_add_listener(this, &impl->device_listener, &device_events, impl);
+	pw_impl_device_set_implementation(this, impl->device);
 
 	if (!SPA_FLAG_IS_SET(impl->flags, PW_SPA_DEVICE_FLAG_NO_REGISTER)) {
-		if ((res = pw_device_register(this, NULL)) < 0)
+		if ((res = pw_impl_device_register(this, NULL)) < 0)
 			goto error_register;
 	}
 	return this;
 
 error_register:
-	pw_device_destroy(this);
+	pw_impl_device_destroy(this);
 	errno = -res;
 	return NULL;
 }
 
-void *pw_spa_device_get_user_data(struct pw_device *device)
+void *pw_spa_device_get_user_data(struct pw_impl_device *device)
 {
-	struct impl *impl = device->user_data;
+	struct impl *impl = pw_impl_device_get_user_data(device);
 	return impl->user_data;
 }
 
-struct pw_device *pw_spa_device_load(struct pw_core *core,
+struct pw_impl_device *pw_spa_device_load(struct pw_context *context,
 				 const char *factory_name,
 				 enum pw_spa_device_flags flags,
 				 struct pw_properties *properties,
 				 size_t user_data_size)
 {
-	struct pw_device *this;
+	struct pw_impl_device *this;
 	struct spa_handle *handle;
 	void *iface;
 	int res;
 
-	handle = pw_core_load_spa_handle(core, factory_name,
+	handle = pw_context_load_spa_handle(context, factory_name,
 			properties ? &properties->dict : NULL);
 	if (handle == NULL)
 		goto error_load;
@@ -137,7 +132,7 @@ struct pw_device *pw_spa_device_load(struct pw_core *core,
 	if ((res = spa_handle_get_interface(handle, SPA_TYPE_INTERFACE_Device, &iface)) < 0)
 		goto error_interface;
 
-	this = pw_spa_device_new(core, flags,
+	this = pw_spa_device_new(context, flags,
 			       iface, handle, properties, user_data_size);
 	if (this == NULL)
 		goto error_device;

@@ -28,7 +28,7 @@
 #include <spa/pod/parser.h>
 #include <spa/utils/result.h>
 
-#include <pipewire/pipewire.h>
+#include <pipewire/impl.h>
 
 #include <extensions/protocol-native.h>
 
@@ -425,7 +425,7 @@ static void device_marshal_object_info(void *object, uint32_t id,
 
 		spa_pod_builder_push_struct(b, &f[1]);
 		spa_pod_builder_add(b,
-			    SPA_POD_Id(info->type),
+			    SPA_POD_String(info->type),
 			    SPA_POD_Long(change_mask),
 			    SPA_POD_Long(info->flags),
 			    SPA_POD_Int(n_items), NULL);
@@ -465,7 +465,7 @@ static int device_demarshal_object_info(void *object,
 		spa_pod_parser_pod(&p2, ipod);
 		if (spa_pod_parser_push_struct(&p2, &f2) < 0 ||
 		    spa_pod_parser_get(&p2,
-				SPA_POD_Id(&info.type),
+				SPA_POD_String(&info.type),
 				SPA_POD_Long(&info.change_mask),
 				SPA_POD_Long(&info.flags),
 				SPA_POD_Int(&props.n_items), NULL) < 0)
@@ -535,11 +535,11 @@ static const struct pw_protocol_marshal pw_protocol_native_client_device_marshal
 	.client_demarshal = pw_protocol_native_device_method_demarshal,
 };
 
-struct pw_protocol *pw_protocol_native_ext_client_device_init(struct pw_core *core)
+struct pw_protocol *pw_protocol_native_ext_client_device_init(struct pw_context *context)
 {
 	struct pw_protocol *protocol;
 
-	protocol = pw_core_find_protocol(core, PW_TYPE_INFO_PROTOCOL_Native);
+	protocol = pw_context_find_protocol(context, PW_TYPE_INFO_PROTOCOL_Native);
 
 	if (protocol == NULL)
 		return NULL;

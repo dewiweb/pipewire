@@ -42,6 +42,7 @@
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
 #include <spa/node/io.h>
+#include <spa/node/keys.h>
 #include <spa/param/param.h>
 #include <spa/param/audio/format.h>
 #include <spa/param/audio/format-utils.h>
@@ -107,7 +108,7 @@ struct impl {
 	struct port port;
 
 	unsigned int started:1;
-	unsigned int slaved:1;
+	unsigned int following:1;
 
 	struct spa_source source;
 
@@ -116,6 +117,7 @@ struct impl {
 
 	struct timespec now;
 	uint32_t sample_count;
+	uint32_t read_mtu;
 };
 
 #define NAME "sco-source"
@@ -208,7 +210,7 @@ static int impl_node_enum_params(void *object, int seq,
 	return 0;
 }
 
-static int do_reslave(struct spa_loop *loop,
+static int do_reassign_follower(struct spa_loop *loop,
 			bool async,
 			uint32_t seq,
 			const void *data,
@@ -218,7 +220,7 @@ static int do_reslave(struct spa_loop *loop,
 	return 0;
 }
 
-static inline bool is_slaved(struct impl *this)
+static inline bool is_following(struct impl *this)
 {
 	return this->position && this->clock && this->position->clock.id != this->clock->id;
 }
@@ -226,7 +228,7 @@ static inline bool is_slaved(struct impl *this)
 static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 {
 	struct impl *this = object;
-	bool slaved;
+	bool following;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
@@ -241,11 +243,11 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 		return -ENOENT;
 	}
 
-	slaved = is_slaved(this);
-	if (this->started && slaved != this->slaved) {
-		spa_log_debug(this->log, "sco-source %p: reslave %d->%d", this, this->slaved, slaved);
-		this->slaved = slaved;
-		spa_loop_invoke(this->data_loop, do_reslave, 0, NULL, 0, true, this);
+	following = is_following(this);
+	if (this->started && following != this->following) {
+		spa_log_debug(this->log, "sco-source %p: reassign follower %d->%d", this, this->following, following);
+		this->following = following;
+		spa_loop_invoke(this->data_loop, do_reassign_follower, 0, NULL, 0, true, this);
 	}
 	return 0;
 }
@@ -293,8 +295,9 @@ static void reset_buffers(struct port *port)
 	}
 }
 
-static bool read_data(struct impl *this, uint8_t *data, uint32_t size, uint32_t *total_read) {
-	const uint32_t mtu_size = this->transport->read_mtu;
+static bool read_data(struct impl *this, uint8_t *data, uint32_t size, uint32_t *total_read)
+{
+	const uint32_t mtu_size = this->read_mtu;
 	uint32_t local_total_read = 0;
 
 	/* Read chunks of mtu_size */
@@ -320,7 +323,7 @@ static bool read_data(struct impl *this, uint8_t *data, uint32_t size, uint32_t 
 
 done:
 	if (total_read)
-	  *total_read = local_total_read;
+		*total_read = local_total_read;
 	return true;
 }
 
@@ -427,7 +430,8 @@ static int do_start(struct impl *this)
 		spa_log_warn(this->log, "sco-source %p: SO_SNDBUF %m", this);
 
 	/* Set the read MTU */
-	val = FILL_FRAMES * this->transport->read_mtu;
+	this->read_mtu = this->transport->read_mtu;
+	val = FILL_FRAMES * this->read_mtu;
 	if (setsockopt(this->sock_fd, SOL_SOCKET, SO_RCVBUF, &val, sizeof(val)) < 0)
 		spa_log_warn(this->log, "sco-source %p: SO_RCVBUF %m", this);
 
@@ -643,7 +647,6 @@ impl_node_port_enum_params(void *object, int seq,
 	case SPA_PARAM_EnumFormat:
 		if (result.index > 0)
 			return 0;
-
 		if (this->transport == NULL)
 			return -EIO;
 
@@ -956,7 +959,7 @@ static const struct spa_bt_transport_events transport_events = {
         .destroy = transport_destroy,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
 
@@ -965,7 +968,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct impl *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Node)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -994,7 +997,7 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	struct port *port;
-	uint32_t i;
+	const char *str;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -1004,19 +1007,10 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct impl *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataLoop:
-			this->data_loop = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_DataSystem:
-			this->data_system = support[i].data;
-			break;
-		}
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
+	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
+
 	if (this->data_loop == NULL) {
 		spa_log_error(this->log, "a data loop is needed");
 		return -EINVAL;
@@ -1065,10 +1059,9 @@ impl_init(const struct spa_handle_factory *factory,
 	spa_list_init(&port->ready);
 	spa_list_init(&port->free);
 
-	for (i = 0; info && i < info->n_items; i++) {
-		if (strcmp(info->items[i].key, SPA_KEY_API_BLUEZ5_TRANSPORT) == 0)
-			sscanf(info->items[i].value, "pointer:%p", &this->transport);
-	}
+	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_BLUEZ5_TRANSPORT)))
+		sscanf(str, "pointer:%p", &this->transport);
+
 	if (this->transport == NULL) {
 		spa_log_error(this->log, "a transport is needed");
 		return -EINVAL;

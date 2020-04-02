@@ -79,8 +79,10 @@ static void on_process(void *userdata)
 	int n_frames, stride;
 	uint8_t *p;
 
-	if ((b = pw_stream_dequeue_buffer(data->stream)) == NULL)
+	if ((b = pw_stream_dequeue_buffer(data->stream)) == NULL) {
+		pw_log_warn("out of buffers: %m");
 		return;
+	}
 
 	buf = b->buffer;
 	if ((p = buf->datas[0].data) == NULL)
@@ -150,7 +152,7 @@ int main(int argc, char *argv[])
 	 * called in a realtime thread. */
 	pw_stream_connect(data.stream,
 			  PW_DIRECTION_OUTPUT,
-			  argc > 1 ? (uint32_t)atoi(argv[1]) : SPA_ID_INVALID,
+			  argc > 1 ? (uint32_t)atoi(argv[1]) : PW_ID_ANY,
 			  PW_STREAM_FLAG_AUTOCONNECT |
 			  PW_STREAM_FLAG_MAP_BUFFERS |
 			  PW_STREAM_FLAG_RT_PROCESS,

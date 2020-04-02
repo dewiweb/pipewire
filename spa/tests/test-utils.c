@@ -63,6 +63,7 @@ static void test_abi(void)
 		spa_assert(f.denom == 125);
 	}
 
+#if defined(__x86_64__)
 	/* dict */
 	spa_assert(sizeof(struct spa_dict_item) == 16);
 	spa_assert(sizeof(struct spa_dict) == 16);
@@ -73,6 +74,7 @@ static void test_abi(void)
 
 	/* list */
 	spa_assert(sizeof(struct spa_list) == 16);
+#endif
 
 	/* ringbuffer */
 	spa_assert(sizeof(struct spa_ringbuffer) == 8);
@@ -101,26 +103,28 @@ static void test_abi(void)
 	spa_assert(SPA_TYPE_Pod == 20);
 	spa_assert(SPA_TYPE_LAST == 21);
 
-	spa_assert(SPA_TYPE_EVENT_START == 0x30000);
-	spa_assert(SPA_TYPE_EVENT_Device == 0x30001);
-	spa_assert(SPA_TYPE_EVENT_Node == 0x30002);
-	spa_assert(SPA_TYPE_EVENT_LAST == 0x30003);
+	spa_assert(SPA_TYPE_EVENT_START == 0x20000);
+	spa_assert(SPA_TYPE_EVENT_Device == 0x20001);
+	spa_assert(SPA_TYPE_EVENT_Node == 0x20002);
+	spa_assert(SPA_TYPE_EVENT_LAST == 0x20003);
 
-	spa_assert(SPA_TYPE_COMMAND_START == 0x40000);
-	spa_assert(SPA_TYPE_COMMAND_Device == 0x40001);
-	spa_assert(SPA_TYPE_COMMAND_Node == 0x40002);
-	spa_assert(SPA_TYPE_COMMAND_LAST == 0x40003);
+	spa_assert(SPA_TYPE_COMMAND_START == 0x30000);
+	spa_assert(SPA_TYPE_COMMAND_Device == 0x30001);
+	spa_assert(SPA_TYPE_COMMAND_Node == 0x30002);
+	spa_assert(SPA_TYPE_COMMAND_LAST == 0x30003);
 
-	spa_assert(SPA_TYPE_OBJECT_START == 0x50000);
-	spa_assert(SPA_TYPE_OBJECT_PropInfo == 0x50001);
-	spa_assert(SPA_TYPE_OBJECT_Props == 0x50002);
-	spa_assert(SPA_TYPE_OBJECT_Format == 0x50003);
-	spa_assert(SPA_TYPE_OBJECT_ParamBuffers == 0x50004);
-	spa_assert(SPA_TYPE_OBJECT_ParamMeta == 0x50005);
-	spa_assert(SPA_TYPE_OBJECT_ParamIO == 0x50006);
-	spa_assert(SPA_TYPE_OBJECT_ParamProfile == 0x50007);
-	spa_assert(SPA_TYPE_OBJECT_ParamPortConfig == 0x50008);
-	spa_assert(SPA_TYPE_OBJECT_LAST == 0x50009);
+	spa_assert(SPA_TYPE_OBJECT_START == 0x40000);
+	spa_assert(SPA_TYPE_OBJECT_PropInfo == 0x40001);
+	spa_assert(SPA_TYPE_OBJECT_Props == 0x40002);
+	spa_assert(SPA_TYPE_OBJECT_Format == 0x40003);
+	spa_assert(SPA_TYPE_OBJECT_ParamBuffers == 0x40004);
+	spa_assert(SPA_TYPE_OBJECT_ParamMeta == 0x40005);
+	spa_assert(SPA_TYPE_OBJECT_ParamIO == 0x40006);
+	spa_assert(SPA_TYPE_OBJECT_ParamProfile == 0x40007);
+	spa_assert(SPA_TYPE_OBJECT_ParamPortConfig == 0x40008);
+	spa_assert(SPA_TYPE_OBJECT_ParamRoute == 0x40009);
+	spa_assert(SPA_TYPE_OBJECT_Profiler == 0x4000a);
+	spa_assert(SPA_TYPE_OBJECT_LAST == 0x4000b);
 
 	spa_assert(SPA_TYPE_VENDOR_PipeWire == 0x02000000);
 	spa_assert(SPA_TYPE_VENDOR_Other == 0x7f000000);

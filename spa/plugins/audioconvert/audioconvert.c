@@ -114,7 +114,8 @@ struct impl {
 };
 
 #define IS_MONITOR_PORT(this,dir,port_id) (dir == SPA_DIRECTION_OUTPUT && port_id > 0 &&	\
-		this->mode[SPA_DIRECTION_INPUT] == SPA_PARAM_PORT_CONFIG_MODE_dsp)
+		this->mode[SPA_DIRECTION_INPUT] == SPA_PARAM_PORT_CONFIG_MODE_dsp &&		\
+		this->mode[SPA_DIRECTION_OUTPUT] != SPA_PARAM_PORT_CONFIG_MODE_dsp)
 
 static void emit_node_info(struct impl *this, bool full)
 {
@@ -142,8 +143,7 @@ static int make_link(struct impl *this,
 	l->in_port = in_port;
 	l->in_flags = 0;
 	l->negotiated = false;
-	l->io.status = SPA_STATUS_NEED_DATA;
-	l->io.buffer_id = SPA_ID_INVALID;
+	l->io = SPA_IO_BUFFERS_INIT;
 	l->n_buffers = 0;
 	l->min_buffers = min_buffers;
 
@@ -473,6 +473,25 @@ static int impl_node_enum_params(void *object, int seq,
 		}
 		break;
 
+	case SPA_PARAM_PortConfig:
+		switch (result.index) {
+		case 0:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamPortConfig, id,
+				SPA_PARAM_PORT_CONFIG_direction, SPA_POD_Id(SPA_DIRECTION_INPUT),
+				SPA_PARAM_PORT_CONFIG_mode,      SPA_POD_Id(this->mode[SPA_DIRECTION_INPUT]));
+			break;
+		case 1:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamPortConfig, id,
+				SPA_PARAM_PORT_CONFIG_direction, SPA_POD_Id(SPA_DIRECTION_OUTPUT),
+				SPA_PARAM_PORT_CONFIG_mode,      SPA_POD_Id(this->mode[SPA_DIRECTION_OUTPUT]));
+			break;
+		default:
+			return 0;
+		}
+		break;
+
 	case SPA_PARAM_PropInfo:
 		return spa_node_enum_params(this->channelmix, seq, id, start, num, filter);
 
@@ -506,6 +525,8 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	switch (id) {
 	case SPA_IO_Position:
 		res = spa_node_set_io(this->resample, id, data, size);
+		res = spa_node_set_io(this->fmt[0], id, data, size);
+		res = spa_node_set_io(this->fmt[1], id, data, size);
 		break;
 	default:
 		res = -ENOENT;
@@ -1043,24 +1064,26 @@ static int impl_node_process(void *object)
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
-	spa_log_trace_fp(this->log, NAME " %p: process %d", this, this->n_links);
+	spa_log_trace_fp(this->log, NAME " %p: process %d %d", this, this->n_links, this->n_nodes);
 
 	while (1) {
 		res = SPA_STATUS_OK;
 		ready = 0;
 		for (i = 0; i < this->n_nodes; i++) {
 			r = spa_node_process(this->nodes[i]);
+
 			spa_log_trace_fp(this->log, NAME " %p: process %d %d: %s",
 					this, i, r, r < 0 ? spa_strerror(r) : "ok");
-			if (r < 0)
+
+			if (SPA_UNLIKELY(r < 0))
 				return r;
 
 			if (r & SPA_STATUS_HAVE_DATA)
 				ready++;
 
-			if (i == 0)
+			if (SPA_UNLIKELY(i == 0))
 				res |= r & SPA_STATUS_NEED_DATA;
-			if (i == this->n_nodes-1)
+			if (SPA_UNLIKELY(i == this->n_nodes-1))
 				res |= r & SPA_STATUS_HAVE_DATA;
 		}
 		if (res & SPA_STATUS_HAVE_DATA)
@@ -1092,7 +1115,7 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
-static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **interface)
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
 
@@ -1101,7 +1124,7 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t type, void **i
 
 	this = (struct impl *) handle;
 
-	if (type == SPA_TYPE_INTERFACE_Node)
+	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -1160,7 +1183,6 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct impl *this;
-	uint32_t i;
 	size_t size;
 	void *iface;
 
@@ -1172,16 +1194,8 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct impl *) handle;
 
-	for (i = 0; i < n_support; i++) {
-		switch (support[i].type) {
-		case SPA_TYPE_INTERFACE_Log:
-			this->log = support[i].data;
-			break;
-		case SPA_TYPE_INTERFACE_CPU:
-			this->cpu = support[i].data;
-			break;
-		}
-	}
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->cpu = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_CPU);
 
 	if (this->cpu)
 		this->max_align = spa_cpu_get_max_align(this->cpu);

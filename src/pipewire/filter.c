@@ -69,13 +69,14 @@ struct queue {
 };
 
 struct data {
-	struct pw_core *core;
-	struct pw_remote *remote;
+	struct pw_context *context;
 	struct spa_hook filter_listener;
 };
 
 struct param {
 	uint32_t id;
+#define PARAM_FLAG_LOCKED	(1 << 0)
+	uint32_t flags;
 	struct spa_list link;
 	struct spa_pod *param;
 };
@@ -97,8 +98,6 @@ struct port {
 	struct spa_list param_list;
 	struct spa_param_info params[5];
 
-	unsigned int alloc_buffers:1;
-
 	struct spa_io_buffers *io;
 
 	struct buffer buffers[MAX_BUFFERS];
@@ -116,16 +115,11 @@ struct filter {
 
 	const char *path;
 
-	struct pw_core *core;
+	struct pw_context *context;
 
 	enum pw_filter_flags flags;
 
-	struct spa_hook remote_listener;
-
-	struct pw_node *node;
-
 	struct spa_node impl_node;
-	struct spa_node_methods node_methods;
 	struct spa_hook_list hooks;
 	struct spa_callbacks callbacks;
 	struct spa_io_position *position;
@@ -133,20 +127,21 @@ struct filter {
 	struct spa_list port_list;;
 	struct port *ports[2][MAX_PORTS];
 
+	uint32_t change_mask_all;
+	struct spa_node_info info;
 	struct spa_list param_list;
 	struct spa_param_info params[5];
-
-	uint32_t pending_seq;
 
 	struct data data;
 	uintptr_t seq;
 	struct pw_time time;
 
-	unsigned int async_connect:1;
 	unsigned int disconnecting:1;
-	unsigned int free_data:1;
+	unsigned int free_proxy:1;
 	unsigned int subscribe:1;
 	unsigned int draining:1;
+	unsigned int allow_mlock:1;
+	unsigned int warn_mlock:1;
 };
 
 static int get_param_index(uint32_t id)
@@ -168,7 +163,7 @@ static int get_param_index(uint32_t id)
 }
 
 static struct param *add_param(struct filter *impl, struct port *port,
-		uint32_t id, const struct spa_pod *param)
+		uint32_t id, uint32_t flags, const struct spa_pod *param)
 {
 	struct param *p;
 	int idx;
@@ -185,19 +180,27 @@ static struct param *add_param(struct filter *impl, struct port *port,
 		return NULL;
 
 	p->id = id;
+	p->flags = flags;
 	p->param = SPA_MEMBER(p, sizeof(struct param), struct spa_pod);
 	memcpy(p->param, param, SPA_POD_SIZE(param));
+	SPA_POD_OBJECT_ID(p->param) = id;
 
 	idx = get_param_index(id);
 
 	if (port) {
 		spa_list_append(&port->param_list, &p->link);
-		if (idx != -1)
+		if (idx != -1) {
+			port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
 			port->params[idx].flags |= SPA_PARAM_INFO_READ;
+			port->params[idx].flags ^= SPA_PARAM_INFO_SERIAL;
+		}
 	} else {
 		spa_list_append(&impl->param_list, &p->link);
-		if (idx != -1)
+		if (idx != -1) {
+			impl->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
 			impl->params[idx].flags |= SPA_PARAM_INFO_READ;
+			impl->params[idx].flags ^= SPA_PARAM_INFO_SERIAL;
+		}
 	}
 	return p;
 }
@@ -213,7 +216,8 @@ static void clear_params(struct filter *impl, struct port *port, uint32_t id)
 		param_list = &impl->param_list;
 
 	spa_list_for_each_safe(p, t, param_list, link) {
-		if (id == SPA_ID_INVALID || p->id == id) {
+		if (id == SPA_ID_INVALID ||
+		    (p->id == id && !(p->flags & PARAM_FLAG_LOCKED))) {
 			spa_list_remove(&p->link);
 			free(p);
 		}
@@ -310,6 +314,9 @@ static bool filter_set_state(struct pw_filter *filter, enum pw_filter_state stat
 			     pw_filter_state_as_string(old),
 			     pw_filter_state_as_string(state), filter->error);
 
+		if (state == PW_FILTER_STATE_ERROR)
+			pw_log_error(NAME" %p: error %s", filter, error);
+
 		filter->state = state;
 		pw_filter_emit_state_changed(filter, old, state, error);
 	}
@@ -343,7 +350,7 @@ static int impl_send_command(void *object, const struct spa_command *command)
 	switch (SPA_NODE_COMMAND_ID(command)) {
 	case SPA_NODE_COMMAND_Suspend:
 	case SPA_NODE_COMMAND_Pause:
-		pw_loop_invoke(impl->core->main_loop,
+		pw_loop_invoke(impl->context->main_loop,
 			NULL, 0, NULL, 0, false, impl);
 		if (filter->state == PW_FILTER_STATE_STREAMING) {
 			pw_log_debug(NAME" %p: pause", filter);
@@ -364,16 +371,13 @@ static int impl_send_command(void *object, const struct spa_command *command)
 	return 0;
 }
 
-static void emit_node_info(struct filter *d)
+static void emit_node_info(struct filter *d, bool full)
 {
-	struct spa_node_info info;
-
-	info = SPA_NODE_INFO_INIT();
-	info.max_input_ports = MAX_PORTS;
-	info.max_output_ports = MAX_PORTS;
-	info.change_mask |= SPA_NODE_CHANGE_MASK_FLAGS;
-	info.flags = SPA_NODE_FLAG_RT;
-	spa_node_emit_info(&d->hooks, &info);
+	if (full)
+		d->info.change_mask = d->change_mask_all;
+	if (d->info.change_mask != 0)
+		spa_node_emit_info(&d->hooks, &d->info);
+	d->info.change_mask = 0;
 }
 
 static void emit_port_info(struct filter *d, struct port *p, bool full)
@@ -382,6 +386,7 @@ static void emit_port_info(struct filter *d, struct port *p, bool full)
 		p->info.change_mask = p->change_mask_all;
 	if (p->info.change_mask != 0)
 		spa_node_emit_port_info(&d->hooks, p->direction, p->id, &p->info);
+	p->info.change_mask = 0;
 }
 
 static int impl_add_listener(void *object,
@@ -395,7 +400,7 @@ static int impl_add_listener(void *object,
 
 	spa_hook_list_isolate(&d->hooks, &save, listener, events, data);
 
-	emit_node_info(d);
+	emit_node_info(d, true);
 
 	spa_list_for_each(p, &d->port_list, link)
 		emit_port_info(d, p, true);
@@ -462,7 +467,7 @@ static int impl_port_enum_params(void *object, int seq,
 	if ((port = get_port(d, direction, port_id)) == NULL)
 		return -EINVAL;
 
-	pw_log_debug(NAME" %p: param id %d (%s) start:%d num:%d", d, id,
+	pw_log_debug(NAME" %p: port %p param id %d (%s) start:%d num:%d", d, port, id,
 			spa_debug_type_find_name(spa_type_param, id),
 			start, num);
 
@@ -490,61 +495,28 @@ static int impl_port_enum_params(void *object, int seq,
 	return 0;
 }
 
-static int port_set_param(struct filter *impl, struct port *port,
-			   uint32_t id, uint32_t flags, const struct spa_pod *param)
+static int update_params(struct filter *impl, struct port *port, uint32_t id,
+		const struct spa_pod **params, uint32_t n_params)
 {
-	struct pw_filter *filter = &impl->this;
-	struct param *p;
-	int res, idx;
+	uint32_t i;
+	int res = 0;
 
-	pw_log_debug(NAME" %p: param changed: %p %d", impl, param, impl->disconnecting);
-	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-		spa_debug_pod(2, NULL, param);
-
-	clear_params(impl, port, id);
-	if (param) {
-		p = add_param(impl, port, id, param);
-		if (p == NULL) {
-			res = -errno;
-			goto error_exit;
+	if (id != SPA_ID_INVALID) {
+		clear_params(impl, port, id);
+	} else {
+		for (i = 0; i < n_params; i++) {
+			if (!spa_pod_is_object(params[i]))
+				continue;
+			clear_params(impl, port, SPA_POD_OBJECT_ID(params[i]));
 		}
-		SPA_POD_OBJECT_ID(p->param) = id;
 	}
-	else
-		p = NULL;
-
-	pw_filter_emit_param_changed(filter, port->user_data, id, p ? p->param : NULL);
-
-	if (filter->state == PW_FILTER_STATE_ERROR)
-		return -EIO;
-
-	idx = get_param_index(id);
-	if (idx != -1) {
-		impl->params[idx].flags |= SPA_PARAM_INFO_READ;
-		impl->params[idx].flags ^= SPA_PARAM_INFO_SERIAL;
-		emit_port_info(impl, port, false);
+	for (i = 0; i < n_params; i++) {
+		if (add_param(impl, port, id, 0, params[i]) == NULL) {
+			res = -errno;
+			break;
+		}
 	}
-	return 0;
-
-error_exit:
 	return res;
-}
-
-static int impl_port_set_param(void *object,
-			       enum spa_direction direction, uint32_t port_id,
-			       uint32_t id, uint32_t flags,
-			       const struct spa_pod *param)
-{
-	struct filter *impl = object;
-	struct port *port;
-
-	if (impl->disconnecting)
-		return param == NULL ? 0 : -EIO;
-
-	if ((port = get_port(impl, direction, port_id)) == NULL)
-		return -EINVAL;
-
-	return port_set_param(impl, port, id, flags, param);
 }
 
 static int map_data(struct filter *impl, struct spa_data *data, int prot)
@@ -552,7 +524,7 @@ static int map_data(struct filter *impl, struct spa_data *data, int prot)
 	void *ptr;
 	struct pw_map_range range;
 
-	pw_map_range_init(&range, data->mapoffset, data->maxsize, impl->core->sc_pagesize);
+	pw_map_range_init(&range, data->mapoffset, data->maxsize, impl->context->sc_pagesize);
 
 	ptr = mmap(NULL, range.size, prot, MAP_SHARED, data->fd, range.offset);
 	if (ptr == MAP_FAILED) {
@@ -563,6 +535,14 @@ static int map_data(struct filter *impl, struct spa_data *data, int prot)
 	pw_log_debug(NAME" %p: fd %"PRIi64" mapped %d %d %p", impl, data->fd,
 			range.offset, range.size, data->data);
 
+	if (impl->allow_mlock && mlock(data->data, data->maxsize) < 0) {
+		pw_log(impl->warn_mlock ? SPA_LOG_LEVEL_WARN : SPA_LOG_LEVEL_DEBUG,
+				NAME" %p: Failed to mlock memory %p %u: %s", impl,
+						data->data, data->maxsize,
+						errno == ENOMEM ?
+						"This is not a problem but for best performance, "
+						"consider increasing RLIMIT_MEMLOCK" : strerror(errno));
+	}
 	return 0;
 }
 
@@ -570,7 +550,7 @@ static int unmap_data(struct filter *impl, struct spa_data *data)
 {
 	struct pw_map_range range;
 
-	pw_map_range_init(&range, data->mapoffset, data->maxsize, impl->core->sc_pagesize);
+	pw_map_range_init(&range, data->mapoffset, data->maxsize, impl->context->sc_pagesize);
 
 	if (munmap(SPA_MEMBER(data->data, -range.start, void), range.size) < 0)
 		pw_log_warn(NAME" %p: failed to unmap: %m", impl);
@@ -603,6 +583,46 @@ static void clear_buffers(struct port *port)
 	port->n_buffers = 0;
 	clear_queue(port, &port->dequeued);
 	clear_queue(port, &port->queued);
+}
+
+static int impl_port_set_param(void *object,
+			       enum spa_direction direction, uint32_t port_id,
+			       uint32_t id, uint32_t flags,
+			       const struct spa_pod *param)
+{
+	struct filter *impl = object;
+	struct pw_filter *filter = &impl->this;
+	struct port *port;
+	int res;
+
+	if (impl->disconnecting)
+		return param == NULL ? 0 : -EIO;
+
+	pw_log_debug(NAME" %p: param changed: %p %d", impl, param, impl->disconnecting);
+
+	if ((port = get_port(impl, direction, port_id)) == NULL)
+		return -EINVAL;
+
+	if (param && pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
+		spa_debug_pod(2, NULL, param);
+
+	if ((res = update_params(impl, port, id, &param, param ? 1 : 0)) < 0)
+		return res;
+
+	if (id == SPA_PARAM_Format && param == NULL)
+		clear_buffers(port);
+
+	pw_filter_emit_param_changed(filter, port->user_data, id, param);
+
+	if (filter->state == PW_FILTER_STATE_ERROR)
+		return -EIO;
+
+	if (port)
+		emit_port_info(impl, port, false);
+	else
+		emit_node_info(impl, false);
+
+	return res;
 }
 
 static int impl_port_use_buffers(void *object,
@@ -727,7 +747,7 @@ static void call_process(struct filter *impl)
 		do_call_process(NULL, false, 1, NULL, 0, impl);
 	}
 	else {
-		pw_loop_invoke(impl->core->main_loop,
+		pw_loop_invoke(impl->context->main_loop,
 			do_call_process, 1, NULL, 0, false, impl);
 	}
 }
@@ -746,7 +766,7 @@ do_call_drained(struct spa_loop *loop,
 
 static void call_drained(struct filter *impl)
 {
-	pw_loop_invoke(impl->core->main_loop,
+	pw_loop_invoke(impl->context->main_loop,
 		do_call_drained, 1, NULL, 0, false, impl);
 }
 
@@ -859,132 +879,39 @@ static void proxy_error(void *_data, int seq, int res, const char *message)
 	filter_set_state(filter, PW_FILTER_STATE_ERROR, message);
 }
 
+static void proxy_bound(void *_data, uint32_t global_id)
+{
+	struct pw_filter *filter = _data;
+	filter->node_id = global_id;
+	filter_set_state(filter, PW_FILTER_STATE_PAUSED, NULL);
+}
+
 static const struct pw_proxy_events proxy_events = {
 	PW_VERSION_PROXY_EVENTS,
 	.destroy = proxy_destroy,
 	.error = proxy_error,
+	.bound = proxy_bound,
 };
 
-static void node_event_info(void *object, const struct pw_node_info *info)
-{
-	struct pw_filter *filter = object;
-	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
-	uint32_t subscribe[info->n_params], n_subscribe = 0;
-	uint32_t i;
-
-	if (info->change_mask & PW_NODE_CHANGE_MASK_PARAMS && !impl->subscribe) {
-		for (i = 0; i < info->n_params; i++) {
-
-			switch (info->params[i].id) {
-			case SPA_PARAM_PropInfo:
-			case SPA_PARAM_Props:
-				subscribe[n_subscribe++] = info->params[i].id;
-				break;
-			default:
-				break;
-			}
-		}
-		if (n_subscribe > 0) {
-			pw_node_proxy_subscribe_params((struct pw_node_proxy*)filter->proxy,
-					subscribe, n_subscribe);
-			impl->subscribe = true;
-		}
-	}
-}
-
-static const struct pw_node_proxy_events node_events = {
-	PW_VERSION_NODE_PROXY_EVENTS,
-	.info = node_event_info,
-};
-
-static int handle_connect(struct pw_filter *filter)
-{
-	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
-	struct pw_properties *props;
-	int res;
-
-	pw_log_debug(NAME" %p: creating node", filter);
-	props = pw_properties_copy(filter->properties);
-
-	impl->node = pw_node_new(impl->core, props, 0);
-	if (impl->node == NULL) {
-		res = -errno;
-		goto error_node;
-	}
-
-	impl->node->port_user_data_size = sizeof(struct port);
-
-	pw_node_set_implementation(impl->node, &impl->impl_node);
-
-	pw_log_debug(NAME" %p: export node %p", filter, impl->node);
-	filter->proxy = pw_remote_export(filter->remote,
-			PW_TYPE_INTERFACE_Node, NULL, impl->node, 0);
-	if (filter->proxy == NULL) {
-		res = -errno;
-		goto error_proxy;
-	}
-
-	pw_proxy_add_listener(filter->proxy, &filter->proxy_listener, &proxy_events, filter);
-	pw_node_proxy_add_listener((struct pw_node_proxy*)filter->proxy,
-			&filter->node_listener, &node_events, filter);
-
-	if (!SPA_FLAG_IS_SET(impl->flags, PW_FILTER_FLAG_INACTIVE))
-		pw_node_set_active(impl->node, true);
-
-	return 0;
-
-error_node:
-	pw_log_error(NAME" %p: can't make node: %s", filter, spa_strerror(res));
-	return res;
-error_proxy:
-	pw_log_error(NAME" %p: can't make proxy: %s", filter, spa_strerror(res));
-	return res;
-}
-
-static void on_remote_state_changed(void *_data, enum pw_remote_state old,
-		enum pw_remote_state state, const char *error)
+static void on_core_error(void *_data, uint32_t id, int seq, int res, const char *message)
 {
 	struct pw_filter *filter = _data;
-	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
 
-	pw_log_debug(NAME" %p: remote state %d", filter, state);
-
-	switch (state) {
-	case PW_REMOTE_STATE_ERROR:
-		filter_set_state(filter, PW_FILTER_STATE_ERROR, error);
-		break;
-	case PW_REMOTE_STATE_UNCONNECTED:
-		filter_set_state(filter, PW_FILTER_STATE_UNCONNECTED, "remote unconnected");
-		break;
-
-	case PW_REMOTE_STATE_CONNECTED:
-		if (impl->async_connect)
-			handle_connect(filter);
-		break;
-
-	default:
-		break;
+	pw_log_error(NAME" %p: error id:%u seq:%d res:%d (%s): %s", filter,
+			id, seq, res, spa_strerror(res), message);
+	if (id == 0) {
+		filter_set_state(filter, PW_FILTER_STATE_UNCONNECTED, message);
 	}
 }
 
-static void on_remote_exported(void *_data, uint32_t proxy_id, uint32_t global_id)
-{
-	struct pw_filter *filter = _data;
-	if (filter->proxy && filter->proxy->id == proxy_id) {
-		filter->node_id = global_id;
-		filter_set_state(filter, PW_FILTER_STATE_PAUSED, NULL);
-	}
-}
-
-static const struct pw_remote_events remote_events = {
-	PW_VERSION_REMOTE_EVENTS,
-	.state_changed = on_remote_state_changed,
-	.exported = on_remote_exported,
+static const struct pw_core_events core_events = {
+	PW_VERSION_CORE_EVENTS,
+	.error = on_core_error,
 };
 
-SPA_EXPORT
-struct pw_filter * pw_filter_new(struct pw_remote *remote, const char *name,
-	      struct pw_properties *props)
+static struct filter *
+filter_new(struct pw_context *context, const char *name,
+		struct pw_properties *props, const struct pw_properties *extra)
 {
 	struct filter *impl;
 	struct pw_filter *this;
@@ -1010,21 +937,18 @@ struct pw_filter * pw_filter_new(struct pw_remote *remote, const char *name,
 		goto error_properties;
 	}
 
-	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL) {
-		const struct pw_properties *p = pw_remote_get_properties(remote);
-
-		if ((str = pw_properties_get(p, PW_KEY_APP_NAME)) != NULL)
-			pw_properties_set(props, PW_KEY_NODE_NAME, str);
-		else if ((str = pw_properties_get(p, PW_KEY_APP_PROCESS_BINARY)) != NULL)
-			pw_properties_set(props, PW_KEY_NODE_NAME, str);
-		else
-			pw_properties_set(props, PW_KEY_NODE_NAME, name);
+	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL && extra) {
+		str = pw_properties_get(extra, PW_KEY_APP_NAME);
+		if (str == NULL)
+			str = pw_properties_get(extra, PW_KEY_APP_PROCESS_BINARY);
+		if (str == NULL)
+			str = name;
+		pw_properties_set(props, PW_KEY_NODE_NAME, name);
 	}
 
 	spa_hook_list_init(&impl->hooks);
 	this->properties = props;
 
-	this->remote = remote;
 	this->name = name ? strdup(name) : NULL;
 	this->node_id = SPA_ID_INVALID;
 
@@ -1036,14 +960,10 @@ struct pw_filter * pw_filter_new(struct pw_remote *remote, const char *name,
 
 	this->state = PW_FILTER_STATE_UNCONNECTED;
 
-	impl->core = remote->core;
-	impl->pending_seq = SPA_ID_INVALID;
+	impl->context = context;
+	impl->allow_mlock = context->defaults.mem_allow_mlock;
 
-	pw_remote_add_listener(remote, &impl->remote_listener, &remote_events, this);
-
-	spa_list_append(&remote->filter_list, &this->link);
-
-	return this;
+	return impl;
 
 error_properties:
 	free(impl);
@@ -1055,6 +975,27 @@ error_cleanup:
 }
 
 SPA_EXPORT
+struct pw_filter * pw_filter_new(struct pw_core *core, const char *name,
+	      struct pw_properties *props)
+{
+	struct filter *impl;
+	struct pw_filter *this;
+	struct pw_context *context = core->context;
+
+	impl = filter_new(context, name, props, core->properties);
+	if (impl == NULL)
+		return NULL;
+
+	this = &impl->this;
+	this->core = core;
+	spa_list_append(&this->core->filter_list, &this->link);
+	pw_core_add_listener(core,
+			&this->core_listener, &core_events, this);
+
+	return this;
+}
+
+SPA_EXPORT
 struct pw_filter *
 pw_filter_new_simple(struct pw_loop *loop,
 		     const char *name,
@@ -1062,33 +1003,35 @@ pw_filter_new_simple(struct pw_loop *loop,
 		     const struct pw_filter_events *events,
 		     void *data)
 {
-	struct pw_filter *filter;
+	struct pw_filter *this;
 	struct filter *impl;
-	struct pw_core *core;
-	struct pw_remote *remote;
+	struct pw_context *context;
 	int res;
 
-	core = pw_core_new(loop, NULL, 0);
-        remote = pw_remote_new(core, NULL, 0);
+	if (props == NULL)
+		props = pw_properties_new(NULL, NULL);
+	if (props == NULL)
+		return NULL;
 
-	filter = pw_filter_new(remote, name, props);
-	if (filter == NULL) {
+	context = pw_context_new(loop, NULL, 0);
+	if (context == NULL)
+		return NULL;
+
+	impl = filter_new(context, name, props, props);
+	if (impl == NULL) {
 		res = -errno;
 		goto error_cleanup;
 	}
 
-	impl = SPA_CONTAINER_OF(filter, struct filter, this);
+	this = &impl->this;
 
-	impl->free_data = true;
-	impl->data.core = core;
-	impl->data.remote = remote;
+	impl->data.context = context;
+	pw_filter_add_listener(this, &impl->data.filter_listener, events, data);
 
-	pw_filter_add_listener(filter, &impl->data.filter_listener, events, data);
-
-	return filter;
+	return this;
 
 error_cleanup:
-	pw_core_destroy(core);
+	pw_context_destroy(context);
 	errno = -res;
 	return NULL;
 }
@@ -1122,8 +1065,10 @@ void pw_filter_destroy(struct pw_filter *filter)
 
 	pw_filter_disconnect(filter);
 
-	spa_hook_remove(&impl->remote_listener);
-	spa_list_remove(&filter->link);
+	if (filter->core) {
+		spa_hook_remove(&filter->core_listener);
+		spa_list_remove(&filter->link);
+	}
 
 	clear_params(impl, NULL, SPA_ID_INVALID);
 
@@ -1134,8 +1079,8 @@ void pw_filter_destroy(struct pw_filter *filter)
 
 	free(filter->name);
 
-	if (impl->free_data)
-		pw_core_destroy(impl->data.core);
+	if (impl->data.context)
+		pw_context_destroy(impl->data.context);
 
 	free(impl);
 }
@@ -1158,9 +1103,9 @@ enum pw_filter_state pw_filter_get_state(struct pw_filter *filter, const char **
 }
 
 SPA_EXPORT
-struct pw_remote *pw_filter_get_remote(struct pw_filter *filter)
+struct pw_core *pw_filter_get_core(struct pw_filter *filter)
 {
-	return filter->remote;
+	return filter->core;
 }
 
 SPA_EXPORT
@@ -1172,15 +1117,12 @@ const char *pw_filter_get_name(struct pw_filter *filter)
 SPA_EXPORT
 const struct pw_properties *pw_filter_get_properties(struct pw_filter *filter, void *port_data)
 {
-	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
 	struct port *port = SPA_CONTAINER_OF(port_data, struct port, user_data);
 
 	if (port_data) {
-		if (port->port)
-			return pw_port_get_properties(port->port);
+		return port->props;
 	} else {
-		if (impl->node)
-			return pw_node_get_properties(impl->node);
+		return filter->properties;
 	}
 	return NULL;
 }
@@ -1193,11 +1135,19 @@ int pw_filter_update_properties(struct pw_filter *filter, void *port_data, const
 	int changed = 0;
 
 	if (port_data) {
-		if (port->port)
-			changed = pw_port_update_properties(port->port, dict);
+		changed = pw_properties_update(port->props, dict);
+		port->info.props = &port->props->dict;
+		if (changed > 0) {
+			port->info.change_mask |= SPA_PORT_CHANGE_MASK_PROPS;
+			emit_port_info(impl, port, false);
+		}
 	} else {
-		if (impl->node)
-			changed = pw_node_update_properties(impl->node, dict);
+		changed = pw_properties_update(filter->properties, dict);
+		impl->info.props = &filter->properties->dict;
+		if (changed > 0) {
+			impl->info.change_mask |= SPA_NODE_CHANGE_MASK_PROPS;
+			emit_node_info(impl, false);
+		}
 	}
 	return changed;
 }
@@ -1210,36 +1160,78 @@ pw_filter_connect(struct pw_filter *filter,
 		  uint32_t n_params)
 {
 	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
-	enum pw_remote_state state;
 	int res;
 	uint32_t i;
 
 	pw_log_debug(NAME" %p: connect", filter);
 	impl->flags = flags;
-	impl->node_methods = impl_node;
+
+	impl->warn_mlock = SPA_FLAG_IS_SET(flags, PW_FILTER_FLAG_RT_PROCESS);
+	pw_properties_set(filter->properties, "mem.warn-mlock",
+			impl->warn_mlock ? "true" : "false");
 
 	impl->impl_node.iface = SPA_INTERFACE_INIT(
 			SPA_TYPE_INTERFACE_Node,
 			SPA_VERSION_NODE,
-			&impl->node_methods, impl);
+			&impl_node, impl);
+
+	impl->change_mask_all =
+		SPA_NODE_CHANGE_MASK_FLAGS |
+		SPA_NODE_CHANGE_MASK_PROPS |
+		SPA_NODE_CHANGE_MASK_PARAMS;
+
+	impl->info = SPA_NODE_INFO_INIT();
+	impl->info.max_input_ports = MAX_PORTS;
+	impl->info.max_output_ports = MAX_PORTS;
+	impl->info.flags = impl->warn_mlock ? SPA_NODE_FLAG_RT : 0;
+	impl->info.props = &filter->properties->dict;
+	impl->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, 0);
+	impl->params[1] = SPA_PARAM_INFO(SPA_PARAM_Meta, 0);
+	impl->params[2] = SPA_PARAM_INFO(SPA_PARAM_IO, 0);
+	impl->params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
+	impl->params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+	impl->info.params = impl->params;
+	impl->info.n_params = SPA_N_ELEMENTS(impl->params);
+	impl->info.change_mask = impl->change_mask_all;
 
 	clear_params(impl, NULL, SPA_ID_INVALID);
 	for (i = 0; i < n_params; i++) {
-		add_param(impl, NULL, SPA_ID_INVALID, params[i]);
+		add_param(impl, NULL, SPA_ID_INVALID, 0, params[i]);
 	}
 
 	impl->disconnecting = false;
 	filter_set_state(filter, PW_FILTER_STATE_CONNECTING, NULL);
 
-	state = pw_remote_get_state(filter->remote, NULL);
-	impl->async_connect = (state == PW_REMOTE_STATE_UNCONNECTED ||
-			 state == PW_REMOTE_STATE_ERROR);
+	if (filter->core == NULL) {
+		filter->core = pw_context_connect(impl->context,
+				pw_properties_copy(filter->properties), 0);
+		if (filter->core == NULL) {
+			res = -errno;
+			goto error_connect;
+		}
+		spa_list_append(&filter->core->filter_list, &filter->link);
+		pw_core_add_listener(filter->core,
+				&filter->core_listener, &core_events, filter);
+		impl->free_proxy = true;
+	}
 
-	if (impl->async_connect)
-		res = pw_remote_connect(filter->remote);
-	else
-		res = handle_connect(filter);
+	pw_log_debug(NAME" %p: export node %p", filter, &impl->impl_node);
+	filter->proxy = pw_core_export(filter->core,
+			SPA_TYPE_INTERFACE_Node, NULL, &impl->impl_node, 0);
+	if (filter->proxy == NULL) {
+		res = -errno;
+		goto error_proxy;
+	}
 
+	pw_proxy_add_listener(filter->proxy, &filter->proxy_listener, &proxy_events, filter);
+
+	return 0;
+
+error_connect:
+	pw_log_error(NAME" %p: can't connect: %s", filter, spa_strerror(res));
+	return res;
+error_proxy:
+	pw_log_error(NAME" %p: can't make proxy: %s", filter, spa_strerror(res));
 	return res;
 }
 
@@ -1257,17 +1249,16 @@ int pw_filter_disconnect(struct pw_filter *filter)
 	pw_log_debug(NAME" %p: disconnect", filter);
 	impl->disconnecting = true;
 
-	if (impl->node)
-		pw_node_set_active(impl->node, false);
-
 	if (filter->proxy)
 		pw_proxy_destroy(filter->proxy);
 
-	if (impl->node) {
-		pw_node_destroy(impl->node);
-		impl->node = NULL;
+	if (impl->free_proxy) {
+		impl->free_proxy = false;
+		spa_hook_remove(&filter->core_listener);
+		spa_list_remove(&filter->link);
+		pw_core_disconnect(filter->core);
+		filter->core = NULL;
 	}
-
 	return 0;
 }
 
@@ -1277,7 +1268,7 @@ static void add_port_params(struct filter *impl, struct port *port)
 	struct spa_pod_builder b;
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	add_param(impl, port, SPA_PARAM_IO,
+	add_param(impl, port, SPA_PARAM_IO, PARAM_FLAG_LOCKED,
 		spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_ParamIO, SPA_PARAM_IO,
 			SPA_PARAM_IO_id,   SPA_POD_Id(SPA_IO_Buffers),
@@ -1290,18 +1281,15 @@ static void add_audio_dsp_port_params(struct filter *impl, struct port *port)
 	struct spa_pod_builder b;
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	add_param(impl, port, SPA_PARAM_EnumFormat,
+	add_param(impl, port, SPA_PARAM_EnumFormat, PARAM_FLAG_LOCKED,
 		spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 			SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
-			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-			SPA_FORMAT_AUDIO_format,   SPA_POD_Id(SPA_AUDIO_FORMAT_F32P),
-			SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(
-						48000, 1, INT32_MAX),
-			SPA_FORMAT_AUDIO_channels, SPA_POD_Int(1)));
+			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_dsp),
+			SPA_FORMAT_AUDIO_format,   SPA_POD_Id(SPA_AUDIO_FORMAT_DSP_F32)));
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	add_param(impl, port, SPA_PARAM_Buffers,
+	add_param(impl, port, SPA_PARAM_Buffers, PARAM_FLAG_LOCKED,
 		spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
 			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(1, 1, MAX_BUFFERS),
@@ -1321,40 +1309,25 @@ static void add_video_dsp_port_params(struct filter *impl, struct port *port)
 	struct spa_pod_builder b;
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	add_param(impl, port, SPA_PARAM_EnumFormat,
+	add_param(impl, port, SPA_PARAM_EnumFormat, PARAM_FLAG_LOCKED,
 		spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 			SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_video),
-			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-			SPA_FORMAT_VIDEO_format,   SPA_POD_Id(SPA_VIDEO_FORMAT_RGBA_F32),
-			SPA_FORMAT_VIDEO_size,	   SPA_POD_CHOICE_RANGE_Rectangle(
-							&SPA_RECTANGLE(320, 240),
-							&SPA_RECTANGLE(1,1),
-							&SPA_RECTANGLE(INT32_MAX, INT32_MAX)),
-			SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(
-							&SPA_FRACTION(25,1),
-							&SPA_FRACTION(0,1),
-							&SPA_FRACTION(INT32_MAX,1))));
+			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_dsp),
+			SPA_FORMAT_VIDEO_format,   SPA_POD_Id(SPA_VIDEO_FORMAT_DSP_F32)));
 }
 
-static int update_params(struct filter *impl, struct port *port,
-		const struct spa_pod **params, uint32_t n_params)
+static void add_control_dsp_port_params(struct filter *impl, struct port *port)
 {
-	uint32_t i;
-	int res = 0;
+	uint8_t buffer[4096];
+	struct spa_pod_builder b;
 
-	for (i = 0; i < n_params; i++) {
-		if (!spa_pod_is_object(params[i]))
-			continue;
-		clear_params(impl, port, SPA_POD_OBJECT_ID(params[i]));
-	}
-	for (i = 0; i < n_params; i++) {
-		if (add_param(impl, port, SPA_ID_INVALID, params[i]) == NULL) {
-			res = -errno;
-			break;
-		}
-	}
-	return res;
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	add_param(impl, port, SPA_PARAM_EnumFormat, PARAM_FLAG_LOCKED,
+		spa_pod_builder_add_object(&b,
+			SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+			SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_application),
+			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control)));
 }
 
 SPA_EXPORT
@@ -1368,18 +1341,16 @@ void *pw_filter_add_port(struct pw_filter *filter,
 	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
 	struct port *p;
 	const char *str;
+	int res;
 
 	if (props == NULL)
 		props = pw_properties_new(NULL, NULL);
 	if (props == NULL)
 		return NULL;
 
-	if ((p = alloc_port(impl, direction, port_data_size)) == NULL) {
-		pw_properties_free(props);
-		return NULL;
-	}
+	if ((p = alloc_port(impl, direction, port_data_size)) == NULL)
+		goto error_cleanup;
 
-	p->alloc_buffers = SPA_FLAG_IS_SET(flags, PW_FILTER_PORT_FLAG_ALLOC_BUFFERS);
 	p->props = props;
 	p->flags = flags;
 
@@ -1390,15 +1361,20 @@ void *pw_filter_add_port(struct pw_filter *filter,
 			add_audio_dsp_port_params(impl, p);
 		else if (!strcmp(str, "32 bit float RGBA video"))
 			add_video_dsp_port_params(impl, p);
+		else if (!strcmp(str, "8 bit raw midi") ||
+		    !strcmp(str, "8 bit raw control"))
+			add_control_dsp_port_params(impl, p);
 	}
 	/* then override with user provided if any */
-	update_params(impl, p, params, n_params);
+	if ((res = update_params(impl, p, SPA_ID_INVALID, params, n_params)) < 0)
+		goto error_free;
 
 	p->change_mask_all = SPA_PORT_CHANGE_MASK_FLAGS |
 		SPA_PORT_CHANGE_MASK_PROPS;
+	p->info = SPA_PORT_INFO_INIT();
 	p->info.change_mask = 0;
 	p->info.flags = 0;
-	if (p->alloc_buffers)
+	if (SPA_FLAG_IS_SET(flags, PW_FILTER_PORT_FLAG_ALLOC_BUFFERS))
 		p->info.flags |= SPA_PORT_FLAG_CAN_ALLOC_BUFFERS;
 	p->info.props = &p->props->dict;
 	p->change_mask_all |= SPA_PORT_CHANGE_MASK_PARAMS;
@@ -1413,6 +1389,15 @@ void *pw_filter_add_port(struct pw_filter *filter,
 	emit_port_info(impl, p, true);
 
 	return p->user_data;
+
+
+error_free:
+	clear_params(impl, p, SPA_ID_INVALID);
+	free(p);
+error_cleanup:
+	if (props)
+		pw_properties_free(props);
+	return NULL;
 }
 
 SPA_EXPORT
@@ -1421,39 +1406,63 @@ int pw_filter_remove_port(void *port_data)
 	struct port *port = SPA_CONTAINER_OF(port_data, struct port, user_data);
 	struct filter *impl = port->filter;
 
+	spa_node_emit_port_info(&impl->hooks, port->direction, port->id, NULL);
+
 	spa_list_remove(&port->link);
 	impl->ports[port->direction][port->id] = NULL;
 
 	clear_buffers(port);
 	clear_params(impl, port, SPA_ID_INVALID);
+	pw_properties_free(port->props);
 	free(port);
 
 	return 0;
 }
 
 SPA_EXPORT
+int pw_filter_set_error(struct pw_filter *filter,
+			int res, const char *error, ...)
+{
+	if (res < 0) {
+		va_list args;
+		char *value;
+
+		va_start(args, error);
+		if (vasprintf(&value, error, args) < 0)
+			return -errno;
+
+		if (filter->proxy)
+			pw_proxy_error(filter->proxy, res, value);
+
+		filter_set_state(filter, PW_STREAM_STATE_ERROR, value);
+		va_end(args);
+		free(value);
+	}
+	return res;
+}
+
+SPA_EXPORT
 int pw_filter_update_params(struct pw_filter *filter,
 		void *port_data,
-		int res,
 		const struct spa_pod **params,
 		uint32_t n_params)
 {
 	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
 	struct port *port;
+	int res;
 
-	pw_log_debug(NAME" %p: update params %d %d", filter, res, impl->pending_seq);
+	pw_log_debug(NAME" %p: update params", filter);
 
 	port = port_data ? SPA_CONTAINER_OF(port_data, struct port, user_data) : NULL;
 
-	if (res < 0) {
-		pw_proxy_error(filter->proxy, res, "params failed");
-		filter_set_state(filter, PW_FILTER_STATE_ERROR, "params error");
-		return 0;
-	}
+	res = update_params(impl, port, SPA_ID_INVALID, params, n_params);
+	if (res < 0)
+		return res;
 
-	res = update_params(impl, port, params, n_params);
-
-	impl->pending_seq = SPA_ID_INVALID;
+	if (port)
+		emit_port_info(impl, port, false);
+	else
+		emit_node_info(impl, false);
 
 	return res;
 }
@@ -1461,10 +1470,7 @@ int pw_filter_update_params(struct pw_filter *filter,
 SPA_EXPORT
 int pw_filter_set_active(struct pw_filter *filter, bool active)
 {
-	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
 	pw_log_debug(NAME" %p: active:%d", filter, active);
-	if (impl->node)
-		pw_node_set_active(impl->node, active);
 	return 0;
 }
 
@@ -1500,7 +1506,7 @@ static inline int call_trigger(struct filter *impl)
 {
 	int res = 0;
 	if (SPA_FLAG_IS_SET(impl->flags, PW_FILTER_FLAG_DRIVER)) {
-		res = pw_loop_invoke(impl->core->data_loop,
+		res = pw_loop_invoke(impl->context->data_loop,
 			do_process, 1, NULL, 0, false, impl);
 	}
 	return res;
@@ -1599,7 +1605,7 @@ SPA_EXPORT
 int pw_filter_flush(struct pw_filter *filter, bool drain)
 {
 	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
-	pw_loop_invoke(impl->core->data_loop,
+	pw_loop_invoke(impl->context->data_loop,
 			drain ? do_drain : do_flush, 1, NULL, 0, true, impl);
 	return 0;
 }

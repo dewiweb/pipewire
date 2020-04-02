@@ -55,6 +55,14 @@ void pw_data_loop_exit(struct pw_data_loop *this)
 	this->running = false;
 }
 
+static void thread_cleanup(void *arg)
+{
+	struct pw_data_loop *this = arg;
+	pw_log_debug(NAME" %p: leave thread", this);
+	this->running = false;
+	pw_loop_leave(this->loop);
+}
+
 static void *do_loop(void *user_data)
 {
 	struct pw_data_loop *this = user_data;
@@ -62,6 +70,8 @@ static void *do_loop(void *user_data)
 
 	pw_log_debug(NAME" %p: enter thread", this);
 	pw_loop_enter(this->loop);
+
+	pthread_cleanup_push(thread_cleanup, this);
 
 	while (this->running) {
 		if ((res = pw_loop_iterate(this->loop, -1)) < 0) {
@@ -71,13 +81,10 @@ static void *do_loop(void *user_data)
 					this, res, spa_strerror(res));
 		}
 	}
-
-	pw_log_debug(NAME" %p: leave thread", this);
-	pw_loop_leave(this->loop);
+	pthread_cleanup_pop(1);
 
 	return NULL;
 }
-
 
 static void do_stop(void *data, uint64_t count)
 {
@@ -86,15 +93,10 @@ static void do_stop(void *data, uint64_t count)
 	this->running = false;
 }
 
-/** Create a new \ref pw_data_loop.
- * \return a newly allocated data loop
- *
- * \memberof pw_data_loop
- */
-SPA_EXPORT
-struct pw_data_loop *pw_data_loop_new(struct pw_properties *properties)
+static struct pw_data_loop *loop_new(struct pw_loop *loop, const struct spa_dict *props)
 {
 	struct pw_data_loop *this;
+	const char *str;
 	int res;
 
 	this = calloc(1, sizeof(struct pw_data_loop));
@@ -105,35 +107,52 @@ struct pw_data_loop *pw_data_loop_new(struct pw_properties *properties)
 
 	pw_log_debug(NAME" %p: new", this);
 
-	this->loop = pw_loop_new(properties);
-	properties = NULL;
-	if (this->loop == NULL) {
+	if (loop == NULL) {
+		loop = pw_loop_new(props);
+		this->created = true;
+	}
+	if (loop == NULL) {
 		res = -errno;
 		pw_log_error(NAME" %p: can't create loop: %m", this);
 		goto error_free;
 	}
+	this->loop = loop;
 
-	this->event = pw_loop_add_event(this->loop, do_stop, this);
-	if (this->event == NULL) {
-		res = -errno;
-		pw_log_error(NAME" %p: can't add event: %m", this);
-		goto error_loop_destroy;
+	if (props == NULL ||
+	    (str = spa_dict_lookup(props, "loop.cancel")) == NULL ||
+	    pw_properties_parse_bool(str) == false) {
+		this->event = pw_loop_add_event(this->loop, do_stop, this);
+		if (this->event == NULL) {
+			res = -errno;
+			pw_log_error(NAME" %p: can't add event: %m", this);
+			goto error_loop_destroy;
+		}
 	}
-
 	spa_hook_list_init(&this->listener_list);
 
 	return this;
 
 error_loop_destroy:
-	pw_loop_destroy(this->loop);
+	if (this->created && this->loop)
+		pw_loop_destroy(this->loop);
 error_free:
 	free(this);
 error_cleanup:
-	if (properties)
-		pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }
+
+/** Create a new \ref pw_data_loop.
+ * \return a newly allocated data loop
+ *
+ * \memberof pw_data_loop
+ */
+SPA_EXPORT
+struct pw_data_loop *pw_data_loop_new(const struct spa_dict *props)
+{
+	return loop_new(NULL, props);
+}
+
 
 /** Destroy a data loop
  * \param loop the data loop to destroy
@@ -148,8 +167,10 @@ void pw_data_loop_destroy(struct pw_data_loop *loop)
 
 	pw_data_loop_stop(loop);
 
-	pw_loop_destroy_source(loop->loop, loop->event);
-	pw_loop_destroy(loop->loop);
+	if (loop->event)
+		pw_loop_destroy_source(loop->loop, loop->event);
+	if (loop->created)
+		pw_loop_destroy(loop->loop);
 	free(loop);
 }
 
@@ -203,11 +224,20 @@ int pw_data_loop_start(struct pw_data_loop *loop)
 SPA_EXPORT
 int pw_data_loop_stop(struct pw_data_loop *loop)
 {
+	pw_log_debug(NAME": %p stopping", loop);
 	if (loop->running) {
-		pw_loop_signal_event(loop->loop, loop->event);
-
+		if (loop->event) {
+			pw_log_debug(NAME": %p signal", loop);
+			pw_loop_signal_event(loop->loop, loop->event);
+		} else {
+			pw_log_debug(NAME": %p cancel", loop);
+			pthread_cancel(loop->thread);
+		}
+		pw_log_debug(NAME": %p join", loop);
 		pthread_join(loop->thread, NULL);
+		pw_log_debug(NAME": %p joined", loop);
 	}
+	pw_log_debug(NAME": %p stopped", loop);
 	return 0;
 }
 

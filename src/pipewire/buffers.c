@@ -39,7 +39,6 @@
 #define NAME "buffers"
 
 #define MAX_ALIGN	32
-#define MAX_BUFFERS	64
 
 struct port {
 	struct spa_node *node;
@@ -56,6 +55,7 @@ static int alloc_buffers(struct pw_mempool *pool,
 			 uint32_t *data_sizes,
 			 int32_t *data_strides,
 			 uint32_t *data_aligns,
+			 uint32_t *data_types,
 			 uint32_t flags,
 			 struct pw_buffers *allocation)
 {
@@ -100,11 +100,14 @@ static int alloc_buffers(struct pw_mempool *pool,
 
 		spa_zero(*d);
 		if (data_sizes[i] > 0) {
+			/* we allocate memory */
 			d->type = SPA_DATA_MemPtr;
 			d->maxsize = data_sizes[i];
 			SPA_FLAG_SET(d->flags, SPA_DATA_FLAG_READWRITE);
 		} else {
-			d->type = SPA_ID_INVALID;
+			/* client allocates memory. Set the mask of possible
+			 * types in the type field */
+			d->type = data_types[i];
 			d->maxsize = 0;
 		}
 		if (SPA_FLAG_IS_SET(flags, PW_BUFFERS_FLAG_DYNAMIC))
@@ -159,20 +162,24 @@ param_filter(struct pw_buffers *this,
         struct spa_pod_builder ib = { 0 };
 	struct spa_pod *oparam, *iparam;
 	uint32_t iidx, oidx, num = 0;
-	int res;
+	int in_res = -EIO, out_res = -EIO;
 
 	for (iidx = 0;;) {
 	        spa_pod_builder_init(&ib, ibuf, sizeof(ibuf));
 		pw_log_debug(NAME" %p: input param %d id:%d", this, iidx, id);
-		if ((res = spa_node_port_enum_params_sync(in_port->node,
+		in_res = spa_node_port_enum_params_sync(in_port->node,
 						in_port->direction, in_port->port_id,
-						id, &iidx, NULL, &iparam, &ib)) < 0)
-			break;
+						id, &iidx, NULL, &iparam, &ib);
 
-		if (res != 1) {
-			if (num > 0)
+		if (in_res < 1) {
+			/* in_res == -ENOENT  : unknown parameter, assume NULL and we will
+			 *                      exit the loop below.
+			 * in_res < 1         : some error or no data, exit now
+			 */
+			if (in_res == -ENOENT)
+				iparam = NULL;
+			else
 				break;
-			iparam = NULL;
 		}
 
 		if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG) && iparam != NULL)
@@ -180,19 +187,32 @@ param_filter(struct pw_buffers *this,
 
 		for (oidx = 0;;) {
 			pw_log_debug(NAME" %p: output param %d id:%d", this, oidx, id);
-			if (spa_node_port_enum_params_sync(out_port->node,
+			out_res = spa_node_port_enum_params_sync(out_port->node,
 						out_port->direction, out_port->port_id,
-						id, &oidx, iparam, &oparam, result) != 1) {
+						id, &oidx, iparam, &oparam, result);
+
+			/* out_res < 1 : no value or error, exit now */
+			if (out_res < 1)
 				break;
-			}
 
 			if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
 				spa_debug_pod(2, NULL, oparam);
-
 			num++;
 		}
-		if (iparam == NULL && num == 0)
+		if (out_res == -ENOENT && iparam) {
+			/* no output param known but we have an input param,
+			 * use that one */
+			spa_pod_builder_raw_padded(result, iparam, SPA_POD_SIZE(iparam));
+			num++;
+		}
+		/* no more input values, exit */
+		if (in_res < 1)
 			break;
+	}
+	if (num == 0) {
+		if (out_res == -ENOENT && in_res == -ENOENT)
+			return 0;
+		return in_res < 0 ? in_res : out_res < 0 ? out_res : -EINVAL;
 	}
 	return num;
 }
@@ -209,7 +229,7 @@ static struct spa_pod *find_param(struct spa_pod **params, uint32_t n_params, ui
 }
 
 SPA_EXPORT
-int pw_buffers_negotiate(struct pw_core *core, uint32_t flags,
+int pw_buffers_negotiate(struct pw_context *context, uint32_t flags,
 		struct spa_node *outnode, uint32_t out_port_id,
 		struct spa_node *innode, uint32_t in_port_id,
 		struct pw_buffers *result)
@@ -223,13 +243,18 @@ int pw_buffers_negotiate(struct pw_core *core, uint32_t flags,
 	uint32_t data_sizes[1];
 	int32_t data_strides[1];
 	uint32_t data_aligns[1];
+	uint32_t types, data_types[1];
 	struct port output = { outnode, SPA_DIRECTION_OUTPUT, out_port_id };
 	struct port input = { innode, SPA_DIRECTION_INPUT, in_port_id };
 	const char *str;
 	int res;
 
-	n_params = param_filter(result, &input, &output, SPA_PARAM_Buffers, &b);
-	n_params += param_filter(result, &input, &output, SPA_PARAM_Meta, &b);
+	res = param_filter(result, &input, &output, SPA_PARAM_Buffers, &b);
+	if (res < 0)
+		return res;
+	n_params = res;
+	if ((res = param_filter(result, &input, &output, SPA_PARAM_Meta, &b)) > 0)
+		n_params += res;
 
 	params = alloca(n_params * sizeof(struct spa_pod *));
 	for (i = 0, offset = 0; i < n_params; i++) {
@@ -241,28 +266,29 @@ int pw_buffers_negotiate(struct pw_core *core, uint32_t flags,
 		offset += SPA_ROUND_UP_N(SPA_POD_SIZE(params[i]), 8);
 	}
 
-	if ((str = pw_properties_get(core->properties, "link.max-buffers")) != NULL)
-		max_buffers = pw_properties_parse_int(str);
-	else
-		max_buffers = MAX_BUFFERS;
+	max_buffers = context->defaults.link_max_buffers;
 
-	if ((str = pw_properties_get(core->properties, PW_KEY_CPU_MAX_ALIGN)) != NULL)
+	if ((str = pw_properties_get(context->properties, PW_KEY_CPU_MAX_ALIGN)) != NULL)
 		align = pw_properties_parse_int(str);
 	else
 		align = MAX_ALIGN;
 
 	minsize = stride = 0;
+	types = SPA_ID_INVALID; /* bitmask of allowed types */
+
 	param = find_param(params, n_params, SPA_TYPE_OBJECT_ParamBuffers);
 	if (param) {
 		uint32_t qmax_buffers = max_buffers,
 		    qminsize = minsize, qstride = stride, qalign = align;
+		uint32_t qtypes = types;
 
 		spa_pod_parse_object(param,
 			SPA_TYPE_OBJECT_ParamBuffers, NULL,
-			SPA_PARAM_BUFFERS_buffers, SPA_POD_Int(&qmax_buffers),
-			SPA_PARAM_BUFFERS_size,    SPA_POD_Int(&qminsize),
-			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(&qstride),
-			SPA_PARAM_BUFFERS_align,   SPA_POD_Int(&qalign));
+			SPA_PARAM_BUFFERS_buffers,  SPA_POD_OPT_Int(&qmax_buffers),
+			SPA_PARAM_BUFFERS_size,     SPA_POD_OPT_Int(&qminsize),
+			SPA_PARAM_BUFFERS_stride,   SPA_POD_OPT_Int(&qstride),
+			SPA_PARAM_BUFFERS_align,    SPA_POD_OPT_Int(&qalign),
+			SPA_PARAM_BUFFERS_dataType, SPA_POD_OPT_Int(&qtypes));
 
 		max_buffers =
 		    qmax_buffers == 0 ? max_buffers : SPA_MIN(qmax_buffers,
@@ -270,14 +296,15 @@ int pw_buffers_negotiate(struct pw_core *core, uint32_t flags,
 		minsize = SPA_MAX(minsize, qminsize);
 		stride = SPA_MAX(stride, qstride);
 		align = SPA_MAX(align, qalign);
+		types = qtypes;
 
-		pw_log_debug(NAME" %p: %d %d %d %d -> %zd %zd %d %zd", result,
-				qminsize, qstride, qmax_buffers, qalign,
-				minsize, stride, max_buffers, align);
+		pw_log_debug(NAME" %p: %d %d %d %d %d -> %zd %zd %d %zd %d", result,
+				qminsize, qstride, qmax_buffers, qalign, qtypes,
+				minsize, stride, max_buffers, align, types);
 	} else {
 		pw_log_warn(NAME" %p: no buffers param", result);
 		minsize = 8192;
-		max_buffers = 4;
+		max_buffers = 2;
 	}
 
 	if (SPA_FLAG_IS_SET(flags, PW_BUFFERS_FLAG_NO_MEM))
@@ -286,14 +313,15 @@ int pw_buffers_negotiate(struct pw_core *core, uint32_t flags,
 	data_sizes[0] = minsize;
 	data_strides[0] = stride;
 	data_aligns[0] = align;
+	data_types[0] = types;
 
-	if ((res = alloc_buffers(core->pool,
+	if ((res = alloc_buffers(context->pool,
 				 max_buffers,
 				 n_params,
 				 params,
 				 1,
 				 data_sizes, data_strides,
-				 data_aligns,
+				 data_aligns, data_types,
 				 flags,
 				 result)) < 0) {
 		pw_log_error(NAME" %p: can't alloc buffers: %s", result, spa_strerror(res));
